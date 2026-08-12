@@ -52,3 +52,9 @@ desktop.ini
 *.keil
 *.uvprojx
 *.uvoptx
+
+# -------------------------
+# Claude Code (no se versiona)
+# -------------------------
+.claude/
+CLAUDE.md

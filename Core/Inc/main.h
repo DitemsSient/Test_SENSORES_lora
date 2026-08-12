@@ -49,6 +49,8 @@ extern "C" {
 
 /* USER CODE END EM */
 
+void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
+
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
 
@@ -63,8 +65,8 @@ void Error_Handler(void);
 #define XIN32_GPIO_Port GPIOC
 #define XOUT32_Pin GPIO_PIN_15
 #define XOUT32_GPIO_Port GPIOC
-#define BUZZER_Pin GPIO_PIN_0
-#define BUZZER_GPIO_Port GPIOH
+#define Motovibrador_Pin GPIO_PIN_0
+#define Motovibrador_GPIO_Port GPIOH
 #define INT_IMU_Pin GPIO_PIN_1
 #define INT_IMU_GPIO_Port GPIOH
 #define MCU_485_TX_Pin GPIO_PIN_0
@@ -81,8 +83,8 @@ void Error_Handler(void);
 #define USB_ID_GPIO_Port GPIOA
 #define BLUETOOTH_MCU_Pin GPIO_PIN_6
 #define BLUETOOTH_MCU_GPIO_Port GPIOA
-#define SENSOR_IR1_Pin GPIO_PIN_7
-#define SENSOR_IR1_GPIO_Port GPIOA
+#define BUZZER_Pin GPIO_PIN_7
+#define BUZZER_GPIO_Port GPIOA
 #define SENSOR_IR2_Pin GPIO_PIN_0
 #define SENSOR_IR2_GPIO_Port GPIOB
 #define SEL_PROG_LORA_O_BLE_Pin GPIO_PIN_1
@@ -109,8 +111,8 @@ void Error_Handler(void);
 #define BLUETOOTH_VSP_GPIO_Port GPIOB
 #define CS_FLASH_Pin GPIO_PIN_5
 #define CS_FLASH_GPIO_Port GPIOB
-#define BUZZERH3_Pin GPIO_PIN_3
-#define BUZZERH3_GPIO_Port GPIOH
+#define SENSOR_IR1_Pin GPIO_PIN_3
+#define SENSOR_IR1_GPIO_Port GPIOH
 #define LORA_RESET_Pin GPIO_PIN_8
 #define LORA_RESET_GPIO_Port GPIOB
 #define BLUETOOTH_RESET_Pin GPIO_PIN_9
