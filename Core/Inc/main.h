@@ -59,12 +59,6 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define GPOUT_Pin GPIO_PIN_13
-#define GPOUT_GPIO_Port GPIOC
-#define XIN32_Pin GPIO_PIN_14
-#define XIN32_GPIO_Port GPIOC
-#define XOUT32_Pin GPIO_PIN_15
-#define XOUT32_GPIO_Port GPIOC
 #define Motovibrador_Pin GPIO_PIN_0
 #define Motovibrador_GPIO_Port GPIOH
 #define INT_IMU_Pin GPIO_PIN_1
@@ -87,10 +81,10 @@ void Error_Handler(void);
 #define BUZZER_GPIO_Port GPIOA
 #define SENSOR_IR2_Pin GPIO_PIN_0
 #define SENSOR_IR2_GPIO_Port GPIOB
-#define SEL_PROG_LORA_O_BLE_Pin GPIO_PIN_1
-#define SEL_PROG_LORA_O_BLE_GPIO_Port GPIOB
-#define SEL_PROG_MCU_O_ModulosFTDI_Pin GPIO_PIN_2
-#define SEL_PROG_MCU_O_ModulosFTDI_GPIO_Port GPIOB
+#define SEL_PROG_LORA_o_BLE_Pin GPIO_PIN_1
+#define SEL_PROG_LORA_o_BLE_GPIO_Port GPIOB
+#define SEL_PROG_MCU_o_ModFTDI_Pin GPIO_PIN_2
+#define SEL_PROG_MCU_o_ModFTDI_GPIO_Port GPIOB
 #define MCU_BLE_TX_Pin GPIO_PIN_10
 #define MCU_BLE_TX_GPIO_Port GPIOB
 #define MCU_BLE_RX_Pin GPIO_PIN_11
@@ -105,18 +99,18 @@ void Error_Handler(void);
 #define MCU_GPS_RX_GPIO_Port GPIOA
 #define RS485_CONTROL_Pin GPIO_PIN_15
 #define RS485_CONTROL_GPIO_Port GPIOA
-#define BLU_AUTORUN_Pin GPIO_PIN_3
-#define BLU_AUTORUN_GPIO_Port GPIOB
-#define BLUETOOTH_VSP_Pin GPIO_PIN_4
-#define BLUETOOTH_VSP_GPIO_Port GPIOB
-#define CS_FLASH_Pin GPIO_PIN_5
-#define CS_FLASH_GPIO_Port GPIOB
+#define BLE_AUTORUN_Pin GPIO_PIN_3
+#define BLE_AUTORUN_GPIO_Port GPIOB
+#define BLE_VSP_Pin GPIO_PIN_4
+#define BLE_VSP_GPIO_Port GPIOB
+#define CD_FLASH_Pin GPIO_PIN_5
+#define CD_FLASH_GPIO_Port GPIOB
 #define SENSOR_IR1_Pin GPIO_PIN_3
 #define SENSOR_IR1_GPIO_Port GPIOH
 #define LORA_RESET_Pin GPIO_PIN_8
 #define LORA_RESET_GPIO_Port GPIOB
-#define BLUETOOTH_RESET_Pin GPIO_PIN_9
-#define BLUETOOTH_RESET_GPIO_Port GPIOB
+#define BLE_RESET_Pin GPIO_PIN_9
+#define BLE_RESET_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

@@ -9,6 +9,8 @@
 
 #include "Logger.h"
 #include <string.h>
+#include <stdarg.h>
+#include <stdio.h>
 
 /* ========================  EXTERNAL HAL HANDLES  ========================== */
 
@@ -41,4 +43,20 @@ void Log_Print(const char *tag, const char *msg)
     HAL_UART_Transmit(s_huart, (uint8_t *)close, 2U,                   LOG_TX_TIMEOUT_MS);
     HAL_UART_Transmit(s_huart, (uint8_t *)msg,   (uint16_t)strlen(msg), LOG_TX_TIMEOUT_MS);
     HAL_UART_Transmit(s_huart, (uint8_t *)crlf,  2U,                   LOG_TX_TIMEOUT_MS);
+}
+
+void Log_Printf(const char *tag, const char *fmt, ...)
+{
+    if (s_huart == NULL || tag == NULL || fmt == NULL) {
+        return;
+    }
+
+    char buf[128];
+
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
+    Log_Print(tag, buf);
 }

@@ -21,7 +21,14 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "Logger.h"
+#include "Buzzer.h"
+#include "Buzzer_Melodias.h"
+#include "Motovibrador.h"
+#include "Flash.h"
+#include "Lora.h"
+#include "GPS.h"
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,7 +38,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+/* Tarea 5: direccion de prueba para Flash — ultimo sector, igual que Flash_Test() */
+#define FLASH_TASK5_TEST_ADDR   0x7FF000U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -46,9 +54,8 @@ I2C_HandleTypeDef hi2c1;
 
 SPI_HandleTypeDef hspi2;
 
-TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim1;
 
-UART_HandleTypeDef huart4;
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
@@ -56,7 +63,8 @@ UART_HandleTypeDef huart3;
 PCD_HandleTypeDef hpcd_USB_FS;
 
 /* USER CODE BEGIN PV */
-
+/* Tarea 6: handle de LoRa enlazado a mano (sin Lora_Init(), ver nota abajo) */
+static Lora_Handle_t hlora;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -66,12 +74,11 @@ static void MX_GPIO_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_SPI2_Init(void);
-static void MX_UART4_Init(void);
+static void MX_TIM1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USB_PCD_Init(void);
-static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -116,13 +123,104 @@ int main(void)
   MX_ADC1_Init();
   MX_I2C1_Init();
   MX_SPI2_Init();
-  MX_UART4_Init();
+  MX_TIM1_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
   MX_USB_PCD_Init();
-  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
+
+  /* ===================  TAREA 1: UART de RS485 (Logger)  =================
+   * Objetivo original: confirmar que se puede escribir por el UART de RS485
+   * usando Log_Print/Log_Printf.
+   *
+   * CAMBIO EN LA MIGRACION A STM32L433CCUx: este MCU no tiene UART4. Se
+   * decidio con el equipo dejar MCU_485_TX/RX (PA0/PA1) como GPIO_Output
+   * simple en el .ioc, solo reservados, sin funcionalidad UART por ahora
+   * (RS485 real queda pendiente de una decision de hardware aparte). El
+   * Logger se reasigno temporalmente al UART de Bluetooth (huart3, USART3,
+   * PB10/PB11) mientras se define una solucion definitiva.
+   *
+   * NOTA: Logger y Bluetooth comparten huart3 — no correr esta prueba a la
+   * vez que otra prueba de Bluetooth.
+   */
+//  Log_Init();
+//  Log_Print("TEST", "Boot OK - Tarea 1: UART Bluetooth (Logger, reasignado de RS485)");
+  /* ======================================================================= */
+
+  /* ===================  TAREA 2: Escaneo de bus I2C1  ====================
+   * EN PAUSA: el escaneo de I2C en la tarjeta Mira dio problema de bus.
+   * No se corre ninguna prueba de I2C en esta tarjeta hasta validar eso.
+   *
+   * Log_Print("TEST", "Boot OK - Tarea 2: Escaneo de bus I2C1");
+   */
+  /* ======================================================================= */
+
+  /* ===================  TAREA 3: Buzzer (melodia)  =======================
+   * Objetivo: confirmar el buzzer tocando una melodia completa una vez al
+   * boot. TIM3 CH2 / PA7 (confirmar que este mapeo siga igual en L433).
+   */
+//  Buzzer_Init();
+//  Log_Print("TEST", "Boot OK - Tarea 3: Buzzer - tocando melodia");
+//  Buzzer_PlayMelody(ode_to_joy, MELODY_LEN(ode_to_joy), 120U);
+//  Log_Print("TEST", "Tarea 3: Buzzer - fin de melodia");
+  /* ======================================================================= */
+
+  /* ===================  TAREA 4: Motovibrador  ============================
+   * Objetivo: confirmar el motor ERM encendiendo 5 s al boot. GPIO PH0,
+   * modo VIBRATOR_MODE_GPIO (on/off).
+   */
+//  Vibrator_Init();
+//  Log_Print("TEST", "Boot OK - Tarea 4: Motovibrador - encendiendo 5s");
+//  Vibrator_On();
+//  HAL_Delay(5000U);
+//  Vibrator_Off();
+//  Log_Print("TEST", "Tarea 4: Motovibrador - apagado");
+  /* ======================================================================= */
+
+  /* ===================  TAREA 5: Flash SPI (MX25L6445E)  ==================
+   * Objetivo: escribir "MENSAJE EN LA FLASH DE PRUEBA" una vez al boot y
+   * despues, cada 3 s en el loop, releerlo y mandarlo por el Logger.
+   * SPI2, CS manual PB5 (confirmar mapeo en L433).
+   */
+//  {
+//      const char *flash_test_msg = "MENSAJE EN LA FLASH DE PRUEBA";
+//
+//      FlashStatus_e st_init  = Flash_Init();
+//      FlashStatus_e st_erase = Flash_EraseSector(FLASH_TASK5_TEST_ADDR);
+//      FlashStatus_e st_write = Flash_Write(FLASH_TASK5_TEST_ADDR,
+//                                            (const uint8_t *)flash_test_msg,
+//                                            (uint32_t)(strlen(flash_test_msg) + 1U));
+//
+//      Log_Printf("FLASH", "Init:%d Erase:%d Write:%d",
+//                 (int)st_init, (int)st_erase, (int)st_write);
+//  }
+  /* ======================================================================= */
+
+  /* ===================  TAREA 6: LoRa (RM1262) - AT por poleo  ============
+   * Objetivo: mandar "AT\r\n" cada 3 s y confirmar que el modulo responde
+   * "OK". Por POLEO (bloqueante), USART2/huart2 sin interrupcion.
+   * NO llamamos Lora_Init() porque esa arma HAL_UART_Receive_IT() y deja el
+   * huart en estado Busy_Rx, lo que bloquearia nuestras llamadas
+   * bloqueantes de abajo. Solo enlazamos el handle a mano.
+   */
+//  hlora.huart = LORA_UART;
+//  Log_Print("TEST", "Boot OK - Tarea 6: LoRa (AT) - por poleo");
+  /* ======================================================================= */
+
+  /* ===================  TAREA 7: GPS (L86-M33) - lectura cruda por poleo ===
+   * El GPS no usa comandos AT: en cuanto FORCE_ON esta en HIGH transmite
+   * solo tramas NMEA ($GPRMC, $GPGGA, ...) sin que se le pida nada. Aqui
+   * solo confirmamos comunicacion leyendo bytes crudos del UART, sin
+   * parsear todavia. Por POLEO, USART1/huart1 sin interrupcion.
+   * NO llamamos Gps_Init() porque esa arma HAL_UART_Receive_IT() y deja el
+   * huart en estado Busy_Rx, lo que bloquearia nuestras llamadas
+   * bloqueantes de abajo. Gps_ForceOn() si se puede llamar: es solo un
+   * HAL_GPIO_WritePin, no toca el UART.
+   */
+//  Gps_ForceOn();
+//  Log_Print("TEST", "Boot OK - Tarea 7: GPS - lectura cruda por poleo");
+  /* ======================================================================= */
 
   /* USER CODE END 2 */
 
@@ -133,6 +231,139 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* ===================  TAREA 1: UART de RS485 (Logger)  =================
+     * Reasignado a Bluetooth (huart3) — ver nota en USER CODE 2.
+     */
+//    Log_Print("TEST", "Escribiendo por UART3 (Bluetooth, Logger reasignado de RS485)");
+//    HAL_Delay(1000U);
+    /* ======================================================================= */
+
+    /* ===================  TAREA 1C: Prueba directa por HAL en los UART  ====
+     * Manda una cadena distinta por cada UART, directo por HAL, sin pasar
+     * por el Logger — util para repetir en el proyecto nuevo si algun UART
+     * sigue sin responder.
+     *
+     * CAMBIO: esta tarjeta (STM32L433CCUx) solo tiene 3 UART disponibles
+     * (USART1=GPS, USART2=LoRa, USART3=Bluetooth) — no hay UART4/RS485, asi
+     * que se quito msg4/huart4 respecto a la version original.
+     */
+//    const uint8_t msg1[] = "PRUEBA UART1\r\n";
+//    const uint8_t msg2[] = "PRUEBA UART2\r\n";
+//    const uint8_t msg3[] = "PRUEBA UART3\r\n";
+//
+//    HAL_UART_Transmit(&huart1, msg1, sizeof(msg1) - 1U, 100U);
+//    HAL_Delay(500U);
+//    HAL_UART_Transmit(&huart2, msg2, sizeof(msg2) - 1U, 100U);
+//    HAL_Delay(500U);
+//    HAL_UART_Transmit(&huart3, msg3, sizeof(msg3) - 1U, 100U);
+    /* ======================================================================= */
+
+    /* ===================  DIAGNOSTICO: Toggle GPIO puro (PH0, Motovibrador)
+     * Confirma que el firmware SI esta corriendo en el micro, sin usar
+     * ningun UART. Prende/apaga PH0 cada 4 s. Medir con multimetro: debe
+     * alternar 3.3V / 0V. Util para repetir primero en el proyecto nuevo
+     * antes que cualquier prueba de UART.
+     */
+//    HAL_GPIO_TogglePin(Motovibrador_GPIO_Port, Motovibrador_Pin);
+//    HAL_Delay(4000U);
+    /* ======================================================================= */
+
+    /* ===================  TAREA 2: Escaneo de bus I2C1  ====================
+     * EN PAUSA: el escaneo de I2C en la tarjeta Mira dio problema de bus.
+     * No se corre hasta validar eso.
+     */
+//    {
+//        uint8_t found      = 0U;
+//        uint8_t busy_count = 0U;
+//        uint8_t err_count  = 0U;
+//
+//        for (uint8_t addr = 1U; addr < 127U; addr++) {
+//            HAL_StatusTypeDef st = HAL_I2C_IsDeviceReady(&hi2c1, (uint16_t)(addr << 1), 1U, 10U);
+//
+//            if (st == HAL_OK) {
+//                Log_Printf("I2C", "Dispositivo encontrado en 0x%02X", addr);
+//                found++;
+//            } else if (st == HAL_BUSY) {
+//                busy_count++;
+//            } else {
+//                err_count++;
+//            }
+//        }
+//
+//        if (found > 0U) {
+//            Log_Printf("I2C", "Total encontrados: %u", found);
+//        } else if (busy_count == 126U) {
+//            Log_Print("I2C", "Escaneo fallo: bus ocupado/atascado en todas las direcciones");
+//        } else {
+//            Log_Printf("I2C", "Ningun dispositivo encontrado (busy:%u err:%u de 126)",
+//                       busy_count, err_count);
+//        }
+//
+//        HAL_Delay(2000U);
+//    }
+    /* ======================================================================= */
+
+    /* ===================  TAREA 3: Buzzer (melodia)  =======================
+     * Sin loop propio — la melodia se reproducia una vez en USER CODE 2.
+     */
+//    HAL_Delay(2000U);
+    /* ======================================================================= */
+
+    /* ===================  TAREA 4: Motovibrador  ============================
+     */
+//    Log_Print("TEST", "Boot OK - Tarea 4: Motovibrador - encendiendo 5s");
+//    Vibrator_On();
+//    HAL_Delay(4000U);
+//    Vibrator_Off();
+//    Log_Print("TEST", "Tarea 4: Motovibrador - apagado");
+//    HAL_Delay(4000U);
+    /* ======================================================================= */
+
+    /* ===================  TAREA 5: Flash SPI (MX25L6445E)  ==================
+     */
+//    char read_buf[64] = {0};
+//
+//    FlashStatus_e st_read = Flash_Read(FLASH_TASK5_TEST_ADDR,
+//                                        (uint8_t *)read_buf,
+//                                        sizeof(read_buf) - 1U);
+//
+//    Log_Printf("FLASH", "Read:%d Msg:\"%s\"", (int)st_read, read_buf);
+//
+//    HAL_Delay(3000U);
+    /* ======================================================================= */
+
+    /* ===================  TAREA 6: LoRa (RM1262) - AT por poleo  ============
+     */
+//    const uint8_t cmd[] = "AT\r\n";
+//    uint8_t       resp[64] = {0};
+//
+//    HAL_UART_Transmit(hlora.huart, cmd, sizeof(cmd) - 1U, LORA_TX_TIMEOUT_MS);
+//
+//    HAL_StatusTypeDef st = HAL_UART_Receive(hlora.huart, resp, sizeof(resp) - 1U, LORA_RX_TIMEOUT_MS);
+//
+//    if (strstr((const char *)resp, "OK") != NULL) {
+//        Log_Printf("LORA", "Respuesta OK: \"%s\"", (const char *)resp);
+//    } else {
+//        Log_Printf("LORA", "Sin OK (st:%d) resp:\"%s\"", (int)st, (const char *)resp);
+//    }
+//
+//    HAL_Delay(3000U);
+    /* ======================================================================= */
+
+    /* ===================  TAREA 7: GPS (L86-M33) - lectura cruda por poleo ===
+     * EN PAUSA: usa el mismo huart1 que la Tarea 1B (Logger). No correr
+     * ambas a la vez.
+     */
+//    uint8_t raw[64] = {0};
+//
+//    HAL_StatusTypeDef st = HAL_UART_Receive(GPS_UART, raw, sizeof(raw) - 1U, 3000U);
+//
+//    if (st == HAL_OK || raw[0] != 0U) {
+//        Log_Printf("GPS", "Crudo recibido: \"%s\"", (const char *)raw);
+//    } else {
+//        Log_Print("GPS", "Sin datos (timeout) - revisar FORCE_ON/cableado");
+//    }
+    /* ======================================================================= */
   }
   /* USER CODE END 3 */
 }
@@ -153,10 +384,16 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
+  /** Configure LSE Drive Capability
+  */
+  HAL_PWR_EnableBkUpAccess();
+  __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_LOW);
+
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSE|RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.LSEState = RCC_LSE_ON;
   RCC_OscInitStruct.MSIState = RCC_MSI_ON;
   RCC_OscInitStruct.MSICalibrationValue = 0;
   RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
@@ -185,6 +422,10 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+
+  /** Enable MSI Auto calibration
+  */
+  HAL_RCCEx_EnableMSIPLLMode();
 }
 
 /**
@@ -338,7 +579,7 @@ static void MX_SPI2_Init(void)
   hspi2.Instance = SPI2;
   hspi2.Init.Mode = SPI_MODE_MASTER;
   hspi2.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi2.Init.DataSize = SPI_DATASIZE_4BIT;
+  hspi2.Init.DataSize = SPI_DATASIZE_8BIT;
   hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi2.Init.NSS = SPI_NSS_SOFT;
@@ -360,86 +601,82 @@ static void MX_SPI2_Init(void)
 }
 
 /**
-  * @brief TIM3 Initialization Function
+  * @brief TIM1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_TIM3_Init(void)
+static void MX_TIM1_Init(void)
 {
 
-  /* USER CODE BEGIN TIM3_Init 0 */
+  /* USER CODE BEGIN TIM1_Init 0 */
 
-  /* USER CODE END TIM3_Init 0 */
+  /* USER CODE END TIM1_Init 0 */
 
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
 
-  /* USER CODE BEGIN TIM3_Init 1 */
+  /* USER CODE BEGIN TIM1_Init 1 */
 
-  /* USER CODE END TIM3_Init 1 */
-  htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 0;
-  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 65535;
-  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 0;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 65535;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
   {
     Error_Handler();
   }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
   {
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
   sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM3_Init 2 */
-
-  /* USER CODE END TIM3_Init 2 */
-  HAL_TIM_MspPostInit(&htim3);
-
-}
-
-/**
-  * @brief UART4 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_UART4_Init(void)
-{
-
-  /* USER CODE BEGIN UART4_Init 0 */
-
-  /* USER CODE END UART4_Init 0 */
-
-  /* USER CODE BEGIN UART4_Init 1 */
-
-  /* USER CODE END UART4_Init 1 */
-  huart4.Instance = UART4;
-  huart4.Init.BaudRate = 115200;
-  huart4.Init.WordLength = UART_WORDLENGTH_8B;
-  huart4.Init.StopBits = UART_STOPBITS_1;
-  huart4.Init.Parity = UART_PARITY_NONE;
-  huart4.Init.Mode = UART_MODE_TX_RX;
-  huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart4.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart4.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart4.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart4) != HAL_OK)
+  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTimeConfig.DeadTime = 0;
+  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTimeConfig.BreakFilter = 0;
+  sBreakDeadTimeConfig.Break2State = TIM_BREAK2_DISABLE;
+  sBreakDeadTimeConfig.Break2Polarity = TIM_BREAK2POLARITY_HIGH;
+  sBreakDeadTimeConfig.Break2Filter = 0;
+  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN UART4_Init 2 */
+  /* USER CODE BEGIN TIM1_Init 2 */
 
-  /* USER CODE END UART4_Init 2 */
+  /* USER CODE END TIM1_Init 2 */
+  HAL_TIM_MspPostInit(&htim1);
 
 }
 
@@ -600,30 +837,14 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, GPOUT_Pin|XOUT32_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(Motovibrador_GPIO_Port, Motovibrador_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, USB_ID_Pin|BLUETOOTH_MCU_Pin|GPS_FORCE_Pin|RS485_CONTROL_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, MCU_485_TX_Pin|MCU_485_RX_Pin|GPS_FORCE_Pin|RS485_CONTROL_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, SEL_PROG_LORA_O_BLE_Pin|SEL_PROG_MCU_O_ModulosFTDI_Pin|LORA_BOOT_Pin|BLU_AUTORUN_Pin
-                          |BLUETOOTH_VSP_Pin|CS_FLASH_Pin|LORA_RESET_Pin|BLUETOOTH_RESET_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pins : GPOUT_Pin XOUT32_Pin */
-  GPIO_InitStruct.Pin = GPOUT_Pin|XOUT32_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : XIN32_Pin */
-  GPIO_InitStruct.Pin = XIN32_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(XIN32_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_WritePin(GPIOB, SEL_PROG_LORA_o_BLE_Pin|SEL_PROG_MCU_o_ModFTDI_Pin|LORA_BOOT_Pin|BLE_AUTORUN_Pin
+                          |BLE_VSP_Pin|CD_FLASH_Pin|LORA_RESET_Pin|BLE_RESET_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : Motovibrador_Pin */
   GPIO_InitStruct.Pin = Motovibrador_Pin;
@@ -638,11 +859,17 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : USB_ID_Pin BLUETOOTH_MCU_Pin GPS_FORCE_Pin RS485_CONTROL_Pin */
-  GPIO_InitStruct.Pin = USB_ID_Pin|BLUETOOTH_MCU_Pin|GPS_FORCE_Pin|RS485_CONTROL_Pin;
+  /*Configure GPIO pins : MCU_485_TX_Pin MCU_485_RX_Pin GPS_FORCE_Pin RS485_CONTROL_Pin */
+  GPIO_InitStruct.Pin = MCU_485_TX_Pin|MCU_485_RX_Pin|GPS_FORCE_Pin|RS485_CONTROL_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : USB_ID_Pin BLUETOOTH_MCU_Pin */
+  GPIO_InitStruct.Pin = USB_ID_Pin|BLUETOOTH_MCU_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pin : SENSOR_IR2_Pin */
@@ -651,10 +878,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(SENSOR_IR2_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : SEL_PROG_LORA_O_BLE_Pin SEL_PROG_MCU_O_ModulosFTDI_Pin LORA_BOOT_Pin BLU_AUTORUN_Pin
-                           BLUETOOTH_VSP_Pin CS_FLASH_Pin LORA_RESET_Pin BLUETOOTH_RESET_Pin */
-  GPIO_InitStruct.Pin = SEL_PROG_LORA_O_BLE_Pin|SEL_PROG_MCU_O_ModulosFTDI_Pin|LORA_BOOT_Pin|BLU_AUTORUN_Pin
-                          |BLUETOOTH_VSP_Pin|CS_FLASH_Pin|LORA_RESET_Pin|BLUETOOTH_RESET_Pin;
+  /*Configure GPIO pins : SEL_PROG_LORA_o_BLE_Pin SEL_PROG_MCU_o_ModFTDI_Pin LORA_BOOT_Pin BLE_AUTORUN_Pin
+                           BLE_VSP_Pin CD_FLASH_Pin LORA_RESET_Pin BLE_RESET_Pin */
+  GPIO_InitStruct.Pin = SEL_PROG_LORA_o_BLE_Pin|SEL_PROG_MCU_o_ModFTDI_Pin|LORA_BOOT_Pin|BLE_AUTORUN_Pin
+                          |BLE_VSP_Pin|CD_FLASH_Pin|LORA_RESET_Pin|BLE_RESET_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
