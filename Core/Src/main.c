@@ -18,17 +18,14 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "Logger.h"
-#include "Buzzer.h"
-#include "Buzzer_Melodias.h"
-#include "Motovibrador.h"
-#include "Flash.h"
-#include "Lora.h"
-#include "GPS.h"
-#include <string.h>
+#include "Driver_RGB.h"
+#include "Bootloader.h"
+#include "Test.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -38,8 +35,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* Tarea 5: direccion de prueba para Flash — ultimo sector, igual que Flash_Test() */
-#define FLASH_TASK5_TEST_ADDR   0x7FF000U
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -60,11 +56,11 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 
-PCD_HandleTypeDef hpcd_USB_FS;
-
 /* USER CODE BEGIN PV */
-/* Tarea 6: handle de LoRa enlazado a mano (sin Lora_Init(), ver nota abajo) */
-static Lora_Handle_t hlora;
+/* Handle del LP55231. NO estatico — Bootloader.c lo referencia con
+ * "extern LP55231_t rgb;". Se queda aqui mientras se arma la libreria de
+ * Inicializacion (ver Core/Doc/Pendientes.md). */
+LP55231_t rgb;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -78,7 +74,6 @@ static void MX_TIM1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_USART3_UART_Init(void);
-static void MX_USB_PCD_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -106,6 +101,18 @@ int main(void)
 
   /* USER CODE BEGIN Init */
 
+  /* DIAGNOSTICO: fuerza un reset completo del dominio RTC/backup al arrancar.
+   * Sospecha: el pin WAKEUP del GPS (dominio RTC/Backup del modulo, ver
+   * datasheet) se forzo en alto sostenido cuando debia quedar N/C — esta
+   * tarjeta en particular dejo de poder entrar al bootloader USB de fabrica
+   * (el Logger de la app SI sigue enumerando bien, pero ese usa un reloj USB
+   * distinto al del bootloader ROM). Si el dominio backup de ESTE micro quedo
+   * en un estado raro por esa maniobra, esto lo limpia. Quitar si no ayuda.
+   */
+  HAL_PWR_EnableBkUpAccess();
+  __HAL_RCC_BACKUPRESET_FORCE();
+  __HAL_RCC_BACKUPRESET_RELEASE();
+
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -127,100 +134,74 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
-  MX_USB_PCD_Init();
+  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
 
-  /* ===================  TAREA 1: UART de RS485 (Logger)  =================
-   * Objetivo original: confirmar que se puede escribir por el UART de RS485
-   * usando Log_Print/Log_Printf.
+  /* ===================  RGB (LP55231) — SIEMPRE primero  ==================
+   * Debe quedar listo antes de Bootloader_CheckAndEnter() y del indicador
+   * verde/azul de abajo, que lo usan para dar retroalimentacion visual.
+   */
+  LP55231_Attach(&rgb, &hi2c1, LP55231_ADDR_7BIT, 100U);
+  LP55231_Begin(&rgb);
+  HAL_Delay(2U);
+  LP55231_Enable(&rgb);
+  /* ======================================================================= */
+
+  /* ===================  BOOTLOADER — SIEMPRE segundo  ======================
+   * PB1 Y PB2 en bajo (los dos) = salta al bootloader USB DFU (no regresa,
+   * parpadea rojo par1/D2 antes de saltar — logica adentro de Bootloader.c).
+   * Si no entra, no toca el LED — lo decidimos aqui abajo (verde/azul).
+   */
+  Bootloader_CheckAndEnter();
+  Log_Init();
+  /* ======================================================================= */
+
+  /* ===================  INDICADOR + LOGGER: segun PB2  ====================
+   * SEL_PROG_MCU_FTDI (PB2) decide si el conector USB-C esta conectado al
+   * periferico USB del propio MCU (0) o al FTDI (1, switch U10) — ver
+   * esquematico.
+   *   PB2 = 0 (modo Logger, USB al MCU) -> parpadea VERDE (par1/D1) y
+   *          llama Log_Init().
+   *   PB2 = 1 (modo FTDI, USB desconectado del MCU) -> parpadea AZUL
+   *          (par1/D7, mismo par) y NO llama Log_Init() — no tiene caso,
+   *          y ademas moverse de PB2 a mitad de sesion con el Logger ya
+   *          inicializado deja la conexion en un estado que solo se
+   *          recupera reconectando el cable USB.
    *
-   * CAMBIO EN LA MIGRACION A STM32L433CCUx: este MCU no tiene UART4. Se
-   * decidio con el equipo dejar MCU_485_TX/RX (PA0/PA1) como GPIO_Output
-   * simple en el .ioc, solo reservados, sin funcionalidad UART por ahora
-   * (RS485 real queda pendiente de una decision de hardware aparte). El
-   * Logger se reasigno temporalmente al UART de Bluetooth (huart3, USART3,
-   * PB10/PB11) mientras se define una solucion definitiva.
+   * OJO: si PB2=1, Log_Init() nunca se llamo — todas las tareas de abajo
+   * que usan Log_Print/Log_Printf simplemente no van a imprimir nada (no
+   * truena, solo se quedan calladas). No es un bug, es lo esperado.
+   */
+  {
+      bool pb2_logger_mode = (HAL_GPIO_ReadPin(BOOTLOADER_BTN_PORT, BOOTLOADER_BTN_PIN) == GPIO_PIN_RESET);
+      /* DIAGNOSTICO TEMPORAL: colores invertidos con el bootloader (que ahora
+       * parpadea verde en vez de rojo) para poder distinguir a simple vista
+       * si el firmware recien flasheado de verdad es el que esta corriendo.
+       * Revertir a 0U (verde) cuando se confirme. */
+      uint8_t led_ch = pb2_logger_mode ? 1U : 6U;  /* D2 (rojo) o D7 (azul) */
+
+      for (uint8_t i = 0U; i < BOOTLOADER_LED_BLINK_COUNT; i++) {
+          LP55231_SetChannelPWM(&rgb, led_ch, 0xFFU);
+          HAL_Delay(BOOTLOADER_LED_BLINK_MS);
+          LP55231_SetChannelPWM(&rgb, led_ch, 0x00U);
+          HAL_Delay(BOOTLOADER_LED_BLINK_MS);
+      }
+
+      if (pb2_logger_mode) {
+          Log_Init();
+      }
+  }
+  /* ======================================================================= */
+
+  /* Todo el codigo de prueba por periferico (Buzzer, Motovibrador, Flash,
+   * LoRa, GPS, IR, I2C, RGB) vive ahora en Test.h/Test.c — ver ese archivo
+   * para el detalle de cada Test_X() y el historial de las tareas de
+   * bring-up ya concluidas. Llamar aqui la que se necesite, ej.:
    *
-   * NOTA: Logger y Bluetooth comparten huart3 — no correr esta prueba a la
-   * vez que otra prueba de Bluetooth.
-   */
-//  Log_Init();
-//  Log_Print("TEST", "Boot OK - Tarea 1: UART Bluetooth (Logger, reasignado de RS485)");
-  /* ======================================================================= */
-
-  /* ===================  TAREA 2: Escaneo de bus I2C1  ====================
-   * EN PAUSA: el escaneo de I2C en la tarjeta Mira dio problema de bus.
-   * No se corre ninguna prueba de I2C en esta tarjeta hasta validar eso.
+   *   Test_GPS_Init();
    *
-   * Log_Print("TEST", "Boot OK - Tarea 2: Escaneo de bus I2C1");
+   * y su _Poll() correspondiente (si aplica) en el while(1) de abajo.
    */
-  /* ======================================================================= */
-
-  /* ===================  TAREA 3: Buzzer (melodia)  =======================
-   * Objetivo: confirmar el buzzer tocando una melodia completa una vez al
-   * boot. TIM3 CH2 / PA7 (confirmar que este mapeo siga igual en L433).
-   */
-//  Buzzer_Init();
-//  Log_Print("TEST", "Boot OK - Tarea 3: Buzzer - tocando melodia");
-//  Buzzer_PlayMelody(ode_to_joy, MELODY_LEN(ode_to_joy), 120U);
-//  Log_Print("TEST", "Tarea 3: Buzzer - fin de melodia");
-  /* ======================================================================= */
-
-  /* ===================  TAREA 4: Motovibrador  ============================
-   * Objetivo: confirmar el motor ERM encendiendo 5 s al boot. GPIO PH0,
-   * modo VIBRATOR_MODE_GPIO (on/off).
-   */
-//  Vibrator_Init();
-//  Log_Print("TEST", "Boot OK - Tarea 4: Motovibrador - encendiendo 5s");
-//  Vibrator_On();
-//  HAL_Delay(5000U);
-//  Vibrator_Off();
-//  Log_Print("TEST", "Tarea 4: Motovibrador - apagado");
-  /* ======================================================================= */
-
-  /* ===================  TAREA 5: Flash SPI (MX25L6445E)  ==================
-   * Objetivo: escribir "MENSAJE EN LA FLASH DE PRUEBA" una vez al boot y
-   * despues, cada 3 s en el loop, releerlo y mandarlo por el Logger.
-   * SPI2, CS manual PB5 (confirmar mapeo en L433).
-   */
-//  {
-//      const char *flash_test_msg = "MENSAJE EN LA FLASH DE PRUEBA";
-//
-//      FlashStatus_e st_init  = Flash_Init();
-//      FlashStatus_e st_erase = Flash_EraseSector(FLASH_TASK5_TEST_ADDR);
-//      FlashStatus_e st_write = Flash_Write(FLASH_TASK5_TEST_ADDR,
-//                                            (const uint8_t *)flash_test_msg,
-//                                            (uint32_t)(strlen(flash_test_msg) + 1U));
-//
-//      Log_Printf("FLASH", "Init:%d Erase:%d Write:%d",
-//                 (int)st_init, (int)st_erase, (int)st_write);
-//  }
-  /* ======================================================================= */
-
-  /* ===================  TAREA 6: LoRa (RM1262) - AT por poleo  ============
-   * Objetivo: mandar "AT\r\n" cada 3 s y confirmar que el modulo responde
-   * "OK". Por POLEO (bloqueante), USART2/huart2 sin interrupcion.
-   * NO llamamos Lora_Init() porque esa arma HAL_UART_Receive_IT() y deja el
-   * huart en estado Busy_Rx, lo que bloquearia nuestras llamadas
-   * bloqueantes de abajo. Solo enlazamos el handle a mano.
-   */
-//  hlora.huart = LORA_UART;
-//  Log_Print("TEST", "Boot OK - Tarea 6: LoRa (AT) - por poleo");
-  /* ======================================================================= */
-
-  /* ===================  TAREA 7: GPS (L86-M33) - lectura cruda por poleo ===
-   * El GPS no usa comandos AT: en cuanto FORCE_ON esta en HIGH transmite
-   * solo tramas NMEA ($GPRMC, $GPGGA, ...) sin que se le pida nada. Aqui
-   * solo confirmamos comunicacion leyendo bytes crudos del UART, sin
-   * parsear todavia. Por POLEO, USART1/huart1 sin interrupcion.
-   * NO llamamos Gps_Init() porque esa arma HAL_UART_Receive_IT() y deja el
-   * huart en estado Busy_Rx, lo que bloquearia nuestras llamadas
-   * bloqueantes de abajo. Gps_ForceOn() si se puede llamar: es solo un
-   * HAL_GPIO_WritePin, no toca el UART.
-   */
-//  Gps_ForceOn();
-//  Log_Print("TEST", "Boot OK - Tarea 7: GPS - lectura cruda por poleo");
-  /* ======================================================================= */
 
   /* USER CODE END 2 */
 
@@ -231,139 +212,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* ===================  TAREA 1: UART de RS485 (Logger)  =================
-     * Reasignado a Bluetooth (huart3) — ver nota en USER CODE 2.
-     */
-//    Log_Print("TEST", "Escribiendo por UART3 (Bluetooth, Logger reasignado de RS485)");
-//    HAL_Delay(1000U);
-    /* ======================================================================= */
-
-    /* ===================  TAREA 1C: Prueba directa por HAL en los UART  ====
-     * Manda una cadena distinta por cada UART, directo por HAL, sin pasar
-     * por el Logger — util para repetir en el proyecto nuevo si algun UART
-     * sigue sin responder.
-     *
-     * CAMBIO: esta tarjeta (STM32L433CCUx) solo tiene 3 UART disponibles
-     * (USART1=GPS, USART2=LoRa, USART3=Bluetooth) — no hay UART4/RS485, asi
-     * que se quito msg4/huart4 respecto a la version original.
-     */
-//    const uint8_t msg1[] = "PRUEBA UART1\r\n";
-//    const uint8_t msg2[] = "PRUEBA UART2\r\n";
-//    const uint8_t msg3[] = "PRUEBA UART3\r\n";
-//
-//    HAL_UART_Transmit(&huart1, msg1, sizeof(msg1) - 1U, 100U);
-//    HAL_Delay(500U);
-//    HAL_UART_Transmit(&huart2, msg2, sizeof(msg2) - 1U, 100U);
-//    HAL_Delay(500U);
-//    HAL_UART_Transmit(&huart3, msg3, sizeof(msg3) - 1U, 100U);
-    /* ======================================================================= */
-
-    /* ===================  DIAGNOSTICO: Toggle GPIO puro (PH0, Motovibrador)
-     * Confirma que el firmware SI esta corriendo en el micro, sin usar
-     * ningun UART. Prende/apaga PH0 cada 4 s. Medir con multimetro: debe
-     * alternar 3.3V / 0V. Util para repetir primero en el proyecto nuevo
-     * antes que cualquier prueba de UART.
-     */
-//    HAL_GPIO_TogglePin(Motovibrador_GPIO_Port, Motovibrador_Pin);
-//    HAL_Delay(4000U);
-    /* ======================================================================= */
-
-    /* ===================  TAREA 2: Escaneo de bus I2C1  ====================
-     * EN PAUSA: el escaneo de I2C en la tarjeta Mira dio problema de bus.
-     * No se corre hasta validar eso.
-     */
-//    {
-//        uint8_t found      = 0U;
-//        uint8_t busy_count = 0U;
-//        uint8_t err_count  = 0U;
-//
-//        for (uint8_t addr = 1U; addr < 127U; addr++) {
-//            HAL_StatusTypeDef st = HAL_I2C_IsDeviceReady(&hi2c1, (uint16_t)(addr << 1), 1U, 10U);
-//
-//            if (st == HAL_OK) {
-//                Log_Printf("I2C", "Dispositivo encontrado en 0x%02X", addr);
-//                found++;
-//            } else if (st == HAL_BUSY) {
-//                busy_count++;
-//            } else {
-//                err_count++;
-//            }
-//        }
-//
-//        if (found > 0U) {
-//            Log_Printf("I2C", "Total encontrados: %u", found);
-//        } else if (busy_count == 126U) {
-//            Log_Print("I2C", "Escaneo fallo: bus ocupado/atascado en todas las direcciones");
-//        } else {
-//            Log_Printf("I2C", "Ningun dispositivo encontrado (busy:%u err:%u de 126)",
-//                       busy_count, err_count);
-//        }
-//
-//        HAL_Delay(2000U);
-//    }
-    /* ======================================================================= */
-
-    /* ===================  TAREA 3: Buzzer (melodia)  =======================
-     * Sin loop propio — la melodia se reproducia una vez en USER CODE 2.
-     */
-//    HAL_Delay(2000U);
-    /* ======================================================================= */
-
-    /* ===================  TAREA 4: Motovibrador  ============================
-     */
-//    Log_Print("TEST", "Boot OK - Tarea 4: Motovibrador - encendiendo 5s");
-//    Vibrator_On();
-//    HAL_Delay(4000U);
-//    Vibrator_Off();
-//    Log_Print("TEST", "Tarea 4: Motovibrador - apagado");
-//    HAL_Delay(4000U);
-    /* ======================================================================= */
-
-    /* ===================  TAREA 5: Flash SPI (MX25L6445E)  ==================
-     */
-//    char read_buf[64] = {0};
-//
-//    FlashStatus_e st_read = Flash_Read(FLASH_TASK5_TEST_ADDR,
-//                                        (uint8_t *)read_buf,
-//                                        sizeof(read_buf) - 1U);
-//
-//    Log_Printf("FLASH", "Read:%d Msg:\"%s\"", (int)st_read, read_buf);
-//
-//    HAL_Delay(3000U);
-    /* ======================================================================= */
-
-    /* ===================  TAREA 6: LoRa (RM1262) - AT por poleo  ============
-     */
-//    const uint8_t cmd[] = "AT\r\n";
-//    uint8_t       resp[64] = {0};
-//
-//    HAL_UART_Transmit(hlora.huart, cmd, sizeof(cmd) - 1U, LORA_TX_TIMEOUT_MS);
-//
-//    HAL_StatusTypeDef st = HAL_UART_Receive(hlora.huart, resp, sizeof(resp) - 1U, LORA_RX_TIMEOUT_MS);
-//
-//    if (strstr((const char *)resp, "OK") != NULL) {
-//        Log_Printf("LORA", "Respuesta OK: \"%s\"", (const char *)resp);
-//    } else {
-//        Log_Printf("LORA", "Sin OK (st:%d) resp:\"%s\"", (int)st, (const char *)resp);
-//    }
-//
-//    HAL_Delay(3000U);
-    /* ======================================================================= */
-
-    /* ===================  TAREA 7: GPS (L86-M33) - lectura cruda por poleo ===
-     * EN PAUSA: usa el mismo huart1 que la Tarea 1B (Logger). No correr
-     * ambas a la vez.
-     */
-//    uint8_t raw[64] = {0};
-//
-//    HAL_StatusTypeDef st = HAL_UART_Receive(GPS_UART, raw, sizeof(raw) - 1U, 3000U);
-//
-//    if (st == HAL_OK || raw[0] != 0U) {
-//        Log_Printf("GPS", "Crudo recibido: \"%s\"", (const char *)raw);
-//    } else {
-//        Log_Print("GPS", "Sin datos (timeout) - revisar FORCE_ON/cableado");
-//    }
-    /* ======================================================================= */
+    /* Ej.: Test_GPS_Poll(); */
   }
   /* USER CODE END 3 */
 }
@@ -583,7 +432,7 @@ static void MX_SPI2_Init(void)
   hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi2.Init.NSS = SPI_NSS_SOFT;
-  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
   hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -621,7 +470,7 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 0;
+  htim1.Init.Prescaler = 79;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 65535;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -696,7 +545,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 9600;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -786,39 +635,6 @@ static void MX_USART3_UART_Init(void)
 }
 
 /**
-  * @brief USB Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USB_PCD_Init(void)
-{
-
-  /* USER CODE BEGIN USB_Init 0 */
-
-  /* USER CODE END USB_Init 0 */
-
-  /* USER CODE BEGIN USB_Init 1 */
-
-  /* USER CODE END USB_Init 1 */
-  hpcd_USB_FS.Instance = USB;
-  hpcd_USB_FS.Init.dev_endpoints = 8;
-  hpcd_USB_FS.Init.speed = PCD_SPEED_FULL;
-  hpcd_USB_FS.Init.phy_itface = PCD_PHY_EMBEDDED;
-  hpcd_USB_FS.Init.Sof_enable = DISABLE;
-  hpcd_USB_FS.Init.low_power_enable = DISABLE;
-  hpcd_USB_FS.Init.lpm_enable = DISABLE;
-  hpcd_USB_FS.Init.battery_charging_enable = DISABLE;
-  if (HAL_PCD_Init(&hpcd_USB_FS) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USB_Init 2 */
-
-  /* USER CODE END USB_Init 2 */
-
-}
-
-/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -837,14 +653,23 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(Motovibrador_GPIO_Port, Motovibrador_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, MCU_485_TX_Pin|MCU_485_RX_Pin|GPS_FORCE_Pin|RS485_CONTROL_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, SEL_PROG_LORA_o_BLE_Pin|SEL_PROG_MCU_o_ModFTDI_Pin|LORA_BOOT_Pin|BLE_AUTORUN_Pin
-                          |BLE_VSP_Pin|CD_FLASH_Pin|LORA_RESET_Pin|BLE_RESET_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, BLE_AUTORUN_Pin|BLE_VSP_Pin|CD_FLASH_Pin|LORA_RESET_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PC13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pin : Motovibrador_Pin */
   GPIO_InitStruct.Pin = Motovibrador_Pin;
@@ -853,11 +678,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(Motovibrador_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : INT_IMU_Pin SENSOR_IR1_Pin */
-  GPIO_InitStruct.Pin = INT_IMU_Pin|SENSOR_IR1_Pin;
+  /*Configure GPIO pin : INT_IMU_Pin */
+  GPIO_InitStruct.Pin = INT_IMU_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
+  HAL_GPIO_Init(INT_IMU_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : MCU_485_TX_Pin MCU_485_RX_Pin GPS_FORCE_Pin RS485_CONTROL_Pin */
   GPIO_InitStruct.Pin = MCU_485_TX_Pin|MCU_485_RX_Pin|GPS_FORCE_Pin|RS485_CONTROL_Pin;
@@ -866,26 +691,34 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : USB_ID_Pin BLUETOOTH_MCU_Pin */
-  GPIO_InitStruct.Pin = USB_ID_Pin|BLUETOOTH_MCU_Pin;
+  /*Configure GPIO pins : Fix3D_Pin BLUETOOTH_MCU_Pin */
+  GPIO_InitStruct.Pin = Fix3D_Pin|BLUETOOTH_MCU_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : SENSOR_IR2_Pin */
-  GPIO_InitStruct.Pin = SENSOR_IR2_Pin;
+  /*Configure GPIO pin : PB0 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : SEL_PROG_LORA_BLU_Pin SEL_PROG_MCU_FTDI_Pin Lora_Boot_Pin BLE_RESET_Pin */
+  GPIO_InitStruct.Pin = SEL_PROG_LORA_BLU_Pin|SEL_PROG_MCU_FTDI_Pin|Lora_Boot_Pin|BLE_RESET_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(SENSOR_IR2_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : SEL_PROG_LORA_o_BLE_Pin SEL_PROG_MCU_o_ModFTDI_Pin LORA_BOOT_Pin BLE_AUTORUN_Pin
-                           BLE_VSP_Pin CD_FLASH_Pin LORA_RESET_Pin BLE_RESET_Pin */
-  GPIO_InitStruct.Pin = SEL_PROG_LORA_o_BLE_Pin|SEL_PROG_MCU_o_ModFTDI_Pin|LORA_BOOT_Pin|BLE_AUTORUN_Pin
-                          |BLE_VSP_Pin|CD_FLASH_Pin|LORA_RESET_Pin|BLE_RESET_Pin;
+  /*Configure GPIO pins : BLE_AUTORUN_Pin BLE_VSP_Pin CD_FLASH_Pin LORA_RESET_Pin */
+  GPIO_InitStruct.Pin = BLE_AUTORUN_Pin|BLE_VSP_Pin|CD_FLASH_Pin|LORA_RESET_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -893,6 +726,11 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+/* HAL_GPIO_EXTI_Callback() y HAL_UART_RxCpltCallback() se movieron a
+ * Test.c — los usan Test_IR_Poll()/Test_GPS_Poll(). No redefinirlos aqui
+ * mientras Test.c este en el proyecto (un solo weak override por funcion
+ * en todo el link). */
 
 /* USER CODE END 4 */
 

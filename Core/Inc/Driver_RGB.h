@@ -26,6 +26,14 @@
 #define LP55231_ADDR_7BIT       0x32U
 #define LP55231_ADDR_HAL        (LP55231_ADDR_7BIT << 1)
 
+/**
+ * @brief Corriente de manejo por defecto aplicada a los 9 canales en LP55231_Enable().
+ * @note  Registro I_CTL: 0-255, ~0.1 mA/paso (max ~25.5 mA a 0xFF, ver datasheet).
+ *        0x14 (20) ≈ 2 mA por canal — bajo consumo, brillo tenue a proposito.
+ *        Subir este valor si se necesita mas brillo, bajarlo si sigue muy intenso.
+ */
+#define LP55231_DEFAULT_DRIVE_CURRENT   0x14U
+
 /* ====================  DEVICE CONSTANTS  ================================== */
 
 /* LP55231 register map */

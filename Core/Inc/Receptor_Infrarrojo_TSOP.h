@@ -2,6 +2,31 @@
  * @file    Receptor_Infrarrojo_TSOP.h
  * @brief   IR receiver driver for TSOP module via Timer Input Capture on STM32L4xx.
  *
+ * @attention DEPRECATED — se deja como referencia/dato historico, sin usarse
+ *            desde main.c (sigue compilando como parte del proyecto, pero
+ *            ningun otro archivo lo referencia). Este driver necesita
+ *            un timer con un canal en modo Input Capture disponible en el
+ *            pin del TSOP (ver ir_config_t: TIM_HandleTypeDef* + tim_channel).
+ *            Esta tarjeta (STM32L433CCUx, UFQFPN48) NO tiene ese recurso
+ *            libre para SENSOR_IR1/SENSOR_IR2 (PH3/PB0) — el unico timer
+ *            configurado en el .ioc es TIM1, ya usado por el Buzzer, y no
+ *            hay TIM3 en este encapsulado (confirmado directo en CubeMX,
+ *            no por suposicion generica del MCU).
+ *
+ *            En teoria Input Capture es la forma MAS eficiente de leer un
+ *            TSOP (el timer captura el timestamp de cada flanco por
+ *            hardware, sin intervencion de la CPU ni jitter de ISR) — pero
+ *            esta limitado al hardware disponible: solo sirve si el pin en
+ *            cuestion tiene un canal IC de algun timer libre. Sin ese
+ *            recurso, no es viable en esta tarjeta.
+ *
+ *            Reemplazado por Receptor_Infrarrojo_EXTI.h — captura por
+ *            interrupcion GPIO (EXTI, ambos flancos) + DWT->CYCCNT como
+ *            referencia de tiempo (contador de ciclos del propio nucleo,
+ *            no depende de ningun TIMx). Menos preciso que Input Capture
+ *            por hardware (hay jitter de ISR), pero funciona con cualquier
+ *            pin y ya se valido contra un transmisor real.
+ *
  * @details Supports frames of 2–8 data bytes plus 1 XOR checksum byte.
  *          Scalable to any timer with Input Capture capability.
  *

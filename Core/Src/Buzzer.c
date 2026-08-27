@@ -11,17 +11,19 @@
 
 /* ======================  EXTERNAL HAL HANDLES  ============================ */
 
-extern TIM_HandleTypeDef htim3;
+extern TIM_HandleTypeDef htim1;
 
 /* ================================  API  =================================== */
 
 /* Public functions declared in the .h */
 
 /**
- * @brief  Starts the timer PWM channel and leaves the buzzer silent.
+ * @brief  Starts the timer PWM complementary channel and leaves the buzzer silent.
+ * @note   PA7 is routed to TIM1_CH1N (complementary output), not TIM1_CH1 —
+ *         must use the PWMN start/stop pair, not the normal one.
  */
 void Buzzer_Init(void) {
-    HAL_TIM_PWM_Start(BUZZER_TIMER, BUZZER_CHANNEL);
+    HAL_TIMEx_PWMN_Start(BUZZER_TIMER, BUZZER_CHANNEL);
     Buzzer_Stop();
 }
 

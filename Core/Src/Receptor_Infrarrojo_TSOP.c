@@ -2,6 +2,10 @@
  * @file    Receptor_Infrarrojo_TSOP.c
  * @brief   Driver implementation for TSOP IR receiver via Timer Input Capture.
  *
+ * @attention DEPRECATED — ver el encabezado de Receptor_Infrarrojo_TSOP.h
+ *            para el detalle. Se deja como referencia/dato historico, sin
+ *            usarse desde main.c. Reemplazado por Receptor_Infrarrojo_EXTI.c.
+ *
  * @date    March 11, 2026
  * @author  César Pérez
  * @version 1.0.0

@@ -54,8 +54,10 @@ HAL_StatusTypeDef LP55231_Begin(LP55231_t *dev) {
 }
 
 /**
- * @brief  Sets CNTRL1 enable bit (bit 6) and configures MISC register
- *         for internal clock, charge pump, and auto-increment.
+ * @brief  Sets CNTRL1 enable bit (bit 6), configures MISC register for
+ *         internal clock, charge pump, and auto-increment, then limits the
+ *         drive current on all 9 channels to LP55231_DEFAULT_DRIVE_CURRENT
+ *         so the LEDs stay dim and the chip draws less current by default.
  */
 HAL_StatusTypeDef LP55231_Enable(LP55231_t *dev) {
     HAL_StatusTypeDef st;
@@ -65,7 +67,20 @@ HAL_StatusTypeDef LP55231_Enable(LP55231_t *dev) {
     if (st != HAL_OK) return st;
 
     /* MISC: internal clock + charge pump + auto increment -> 0x53 */
-    return LP55231_WriteReg(dev, REG_MISC, 0x53U);
+    st = LP55231_WriteReg(dev, REG_MISC, 0x53U);
+    if (st != HAL_OK) return st;
+
+    /* Startup delay: charge pump / oscillator need ~500 us before the rest
+     * of the register writes are guaranteed to stick. */
+    HAL_Delay(1U);
+
+    for (uint8_t ch = 0U; ch < LP55231_NUM_CHANNELS; ch++) {
+        if (!LP55231_SetDriveCurrent(dev, ch, LP55231_DEFAULT_DRIVE_CURRENT)) {
+            return HAL_ERROR;
+        }
+    }
+
+    return HAL_OK;
 }
 
 /**

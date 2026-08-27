@@ -22,8 +22,8 @@
 
 /* Timer and PWM channel assigned to the buzzer */
 
-#define BUZZER_TIMER            (&htim3)
-#define BUZZER_CHANNEL          TIM_CHANNEL_2
+#define BUZZER_TIMER            (&htim1)
+#define BUZZER_CHANNEL          TIM_CHANNEL_1
 
 /**
  * @brief Effective timer clock in Hz after the prescaler.

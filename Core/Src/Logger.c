@@ -1,62 +1,80 @@
 /**
  * @file    Logger.c
- * @brief   Serial logging implementation, compartido con el UART de RS485 (UART4).
+ * @brief   Serial logging implementation over USB CDC.
  *
  * @date    July 03, 2026
  * @author  César Pérez
- * @version 1.0.0
+ * @version 2.0.0
  */
 
 #include "Logger.h"
+#include "usbd_cdc_if.h"
 #include <string.h>
-#include <stdarg.h>
 #include <stdio.h>
-
-/* ========================  EXTERNAL HAL HANDLES  ========================== */
-
-extern UART_HandleTypeDef huart4;
+#include <stdarg.h>
+#include <stdbool.h>
 
 /* ========================  PRIVATE STATE  ================================= */
 
-static UART_HandleTypeDef *s_huart = NULL;
+static bool s_ready = false;
+
+/* ======================  STATIC FUNCTIONS  ================================ */
+
+/**
+ * @brief  Sends a buffer over USB CDC, retrying while the endpoint is busy.
+ * @param  data  Buffer to transmit.
+ * @param  len   Number of bytes.
+ * @note   Gives up silently after LOG_TX_TIMEOUT_MS — logging must never
+ *         hang the app if nothing is connected on the other end.
+ */
+static void Log_TransmitUSB(uint8_t *data, uint16_t len) {
+    uint32_t start = HAL_GetTick();
+
+    while (CDC_Transmit_FS(data, len) == USBD_BUSY) {
+        if ((HAL_GetTick() - start) > LOG_TX_TIMEOUT_MS) {
+            return;
+        }
+    }
+}
 
 /* ========================  PUBLIC FUNCTIONS  =============================== */
 
 void Log_Init(void)
 {
-    s_huart = LOG_UART;
+    s_ready = true;
 }
 
 void Log_Print(const char *tag, const char *msg)
 {
-    if (s_huart == NULL || tag == NULL || msg == NULL) {
+    if (!s_ready || tag == NULL || msg == NULL) {
         return;
     }
 
-    /* "[TAG] msg\r\n" — built in two transmit calls to avoid a stack buffer */
-    const char *open  = "[";
-    const char *close = "] ";
-    const char *crlf  = "\r\n";
+    char out[LOG_MAX_MSG_LEN];
+    int len = snprintf(out, sizeof(out), "[%s] %s\r\n", tag, msg);
 
-    HAL_UART_Transmit(s_huart, (uint8_t *)open,  1U,                   LOG_TX_TIMEOUT_MS);
-    HAL_UART_Transmit(s_huart, (uint8_t *)tag,   (uint16_t)strlen(tag), LOG_TX_TIMEOUT_MS);
-    HAL_UART_Transmit(s_huart, (uint8_t *)close, 2U,                   LOG_TX_TIMEOUT_MS);
-    HAL_UART_Transmit(s_huart, (uint8_t *)msg,   (uint16_t)strlen(msg), LOG_TX_TIMEOUT_MS);
-    HAL_UART_Transmit(s_huart, (uint8_t *)crlf,  2U,                   LOG_TX_TIMEOUT_MS);
+    if (len <= 0) {
+        return;
+    }
+    if ((size_t)len >= sizeof(out)) {
+        len = (int)sizeof(out) - 1;
+    }
+
+    Log_TransmitUSB((uint8_t *)out, (uint16_t)len);
 }
 
 void Log_Printf(const char *tag, const char *fmt, ...)
 {
-    if (s_huart == NULL || tag == NULL || fmt == NULL) {
+    if (!s_ready || tag == NULL || fmt == NULL) {
         return;
     }
 
-    char buf[128];
+    char msg[LOG_MAX_MSG_LEN];
 
     va_list args;
     va_start(args, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, args);
+    vsnprintf(msg, sizeof(msg), fmt, args);
     va_end(args);
 
-    Log_Print(tag, buf);
+    Log_Print(tag, msg);
 }
