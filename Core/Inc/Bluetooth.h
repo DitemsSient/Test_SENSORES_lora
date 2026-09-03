@@ -29,7 +29,7 @@ extern "C" {
 
 /* UART handle — update to match CubeMX .ioc */
 
-#define BT_UART                 (&huart1)
+#define BT_UART                 (&huart3)
 
 /* Timeouts */
 

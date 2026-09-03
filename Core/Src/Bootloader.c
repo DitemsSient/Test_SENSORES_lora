@@ -9,19 +9,10 @@
 
 #include "Bootloader.h"
 #include "Driver_RGB.h"
-#include "usbd_conf.h"
 
 /* Handle del LP55231, ya atado/Begin/Enable por el caller antes de llamar
- * a Bootloader_CheckAndEnter() — ver main.c USER CODE 2. */
+ * a Bootloader_CheckAndEnter() — ver Inicializacion.c. */
 extern LP55231_t rgb;
-
-/* Handle del USB device (CDC), ya inicializado por MX_USB_DEVICE_Init() en
- * main() ANTES de que se revisen los pines del bootloader. Hay que
- * des-inicializarlo (baja el pull-up USB) antes de saltar al bootloader de
- * sistema — si no, el host todavia ve el CDC enumerado cuando el MCU salta,
- * y el ROM bootloader trata de re-enumerar sobre un bus que Windows cree
- * ocupado (se ve como "se conecta, se desconecta, error amarillo"). */
-extern PCD_HandleTypeDef hpcd_USB_FS;
 
 /* Par1 del mapeo fisico confirmado de esta tarjeta: D1=verde, D2=rojo. */
 #define BOOTLOADER_LED_CH_GREEN     0U   /* D1 */
@@ -38,19 +29,11 @@ extern PCD_HandleTypeDef hpcd_USB_FS;
 static void Bootloader_JumpToSystemMemory(void) {
     void (*SysMemBootJump)(void);
 
-    /* Apaga el USB (baja el pull-up) ANTES de tocar clocks/NVIC, para que
-     * el host detecte la desconexion del CDC limpiamente antes de que el
-     * ROM bootloader intente re-enumerar. Un pequeno delay le da tiempo al
-     * host de procesarlo. */
-    HAL_PCD_DeInit(&hpcd_USB_FS);
-
-    /* HAL_PCD_DeInit() solo apaga el reloj del periferico USB, no limpia
-     * sus registros (direccion, endpoints, etc. quedan con lo que dejo el
-     * CDC de la app). Forzamos un reset real via RCC para que el ROM
-     * bootloader arranque desde el mismo estado que tendria justo despues
-     * de un power-on, sin arrastrar nada. */
-    __HAL_RCC_USB_FORCE_RESET();
-    __HAL_RCC_USB_RELEASE_RESET();
+    /* NOTA: ya no hace falta des-inicializar el USB aqui (HAL_PCD_DeInit +
+     * reset del periferico) — con Inicializacion_Run() el USB se
+     * inicializa DESPUES de esta decision, nunca antes. Si esta funcion
+     * corre, el USB del propio MCU sigue sin tocarse, asi que no hay nada
+     * que limpiar ni riesgo de que el host lo vea a medio enumerar. */
 
     /* DIAGNOSTICO: esta tarjeta SI tiene el LSE (cristal 32.768kHz en
      * PC14/PC15) configurado y encendido por SystemClock_Config(). El
@@ -114,22 +97,17 @@ Bootloader_Status_e Bootloader_CheckAndEnter(void) {
     bool pressed  = pin1_low && pin2_low;
 
     if (pressed) {
-        /* DIAGNOSTICO TEMPORAL: colores invertidos (verde aqui, antes rojo)
-         * para confirmar a simple vista si el firmware que se esta flasheando
-         * de verdad es el que se esta corriendo. Revertir a
-         * BOOTLOADER_LED_CH_RED cuando se confirme. */
         for (uint8_t i = 0U; i < BOOTLOADER_LED_BLINK_COUNT; i++) {
-            LP55231_SetChannelPWM(&rgb, BOOTLOADER_LED_CH_GREEN, 0xFFU);
+            LP55231_SetChannelPWM(&rgb, BOOTLOADER_LED_CH_RED, 0xFFU);
             HAL_Delay(BOOTLOADER_LED_BLINK_MS);
-            LP55231_SetChannelPWM(&rgb, BOOTLOADER_LED_CH_GREEN, 0x00U);
+            LP55231_SetChannelPWM(&rgb, BOOTLOADER_LED_CH_RED, 0x00U);
             HAL_Delay(BOOTLOADER_LED_BLINK_MS);
         }
         Bootloader_JumpToSystemMemory();
         /* Unreachable. */
     }
 
-    /* No entrado: no se toca el LED aqui — main.c decide verde/azul segun
-     * PB2 (modo Logger o modo FTDI), reutilizando la misma lectura que ya
-     * usa para condicionar Log_Init(). Ver USER CODE 2. */
+    /* No entrado: no se toca el LED aqui — Inicializacion_Run() parpadea
+     * verde para confirmar visualmente que el arranque sigue normal. */
     return BOOTLOADER_NOT_ENTERED;
 }

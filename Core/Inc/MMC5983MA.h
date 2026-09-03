@@ -1,6 +1,6 @@
 /**
  * @file    MMC5983MA.h
- * @brief   3-axis magnetometer driver for MEMSIC MMC5983MA over I2C on STM32L4xx.
+ * @brief   3-axis magnetometer driver for MEMSIC MMC5983MA over I2C on STM32F4xx.
  *
  * @details Configures the MMC5983MA for continuous measurement at 10 Hz with
  *          automatic SET/RESET enabled (auto-demagnetization every measurement).

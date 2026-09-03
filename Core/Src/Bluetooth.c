@@ -16,7 +16,7 @@
 
 /* ========================  EXTERNAL HAL HANDLES  ========================== */
 
-extern UART_HandleTypeDef huart1;
+extern UART_HandleTypeDef huart3;
 
 
 /* ========================  PUBLIC FUNCTIONS  =============================== */

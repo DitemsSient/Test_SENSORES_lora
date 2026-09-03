@@ -1,11 +1,17 @@
 /**
  * @file    LSM6DSO32TR.h
- * @brief   6-axis IMU driver for ST LSM6DSO32TR (accel + gyro) over I2C on STM32L4xx.
+ * @brief   6-axis IMU driver over I2C on STM32L433 — chip real: LSM6DS3
+ *          (WHO_AM_I 0x69, confirmado en la tarjeta física), no LSM6DSO32TR.
  *
- * @details Configures the LSM6DSO32TR accelerometer and gyroscope with a fixed
- *          ODR of 104 Hz (high-performance, low-noise), delivers all six axes
- *          in a single 12-byte burst read, and applies a gyroscope bias
- *          calibration computed at startup.
+ * @details El mapa de registros usado aquí (CTRL1_XL, CTRL2_G, CTRL3_C,
+ *          OUTX_L_G, OUTX_L_XL, WHO_AM_I) y la codificación de bits son
+ *          compatibles entre LSM6DS3 y LSM6DSO32TR, así que el driver se
+ *          mantiene sin cambios salvo el valor esperado de WHO_AM_I.
+ *
+ *          Configura el acelerómetro y giroscopio con un ODR fijo de 104 Hz
+ *          (high-performance, low-noise), entrega los seis ejes en un burst
+ *          de 12 bytes, y aplica una calibración de bias del giroscopio al
+ *          arranque.
  *
  *          Full-scale ranges used:
  *          - Accelerometer: ±16 g  (CTRL1_XL FS = 01)
@@ -18,7 +24,7 @@
  *
  * @date    June 12, 2026
  * @author  César Pérez
- * @version 1.0.0
+ * @version 1.1.0
  */
 
 #ifndef LSM6DSO32TR_H
@@ -45,7 +51,7 @@
 
 /* Register map (relevant subset) */
 
-#define LSM_REG_WHO_AM_I        0x0FU   /**< Device ID, expected 0x6C        */
+#define LSM_REG_WHO_AM_I        0x0FU   /**< Device ID, expected 0x69 (LSM6DS3) */
 #define LSM_REG_CTRL1_XL        0x10U   /**< Accelerometer control           */
 #define LSM_REG_CTRL2_G         0x11U   /**< Gyroscope control               */
 #define LSM_REG_CTRL3_C         0x12U   /**< General control (SW reset, BDU) */
@@ -71,7 +77,7 @@
 
 /* Device identification */
 
-#define LSM_WHO_AM_I_VAL        0x6CU
+#define LSM_WHO_AM_I_VAL        0x69U   /**< LSM6DS3 (chip real en esta tarjeta) */
 
 /* Sensitivity constants */
 

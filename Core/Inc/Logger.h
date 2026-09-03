@@ -2,16 +2,23 @@
  * @file    Logger.h
  * @brief   Serial logging over the USB CDC virtual COM port.
  *
- * @details Provides Log_Print()/Log_Printf() for any driver or module to
- *          emit tagged text messages to a terminal connected to the board's
- *          USB CDC port (see USB_DEVICE/App/usbd_cdc_if.c, CDC_Transmit_FS).
- *          Thread-safety: none — a RTOS mutex should be added later.
+ * @details Provides Log_Print()/Log_Printf() for any driver o modulo emitir
+ *          mensajes de texto por el puerto USB CDC (ver
+ *          USB_DEVICE/App/usbd_cdc_if.c, CDC_Transmit_FS).
+ *
+ *          Thread-safety: Log_InitMutex() crea un mutex opcional. Mientras
+ *          no se llame (arranque bare-metal, antes de osKernelInitialize())
+ *          Log_Print()/Log_Printf() funcionan sin lock — un solo hilo de
+ *          ejecucion en ese punto, no hace falta. Una vez creado el mutex
+ *          (despues de osKernelInitialize(), antes de osKernelStart(), ver
+ *          Inicializacion_Run()), cada llamada lo toma/suelta — necesario
+ *          en cuanto haya mas de una tarea usando el Logger a la vez.
  *
  *          Usage:
- *            main.c  → call Log_Init() once after MX_USB_DEVICE_Init().
- *                      Only reached when Bootloader_CheckAndEnter() did NOT
- *                      jump to the DFU bootloader (see Bootloader.h).
- *            others  → #include "Logger.h" and call Log_Print(TAG, msg).
+ *            main.c  → Log_Init() dentro de Inicializacion_Run() (antes del
+ *                      kernel). Log_InitMutex() despues de
+ *                      osKernelInitialize(), antes de osKernelStart().
+ *            others  → #include "Logger.h" y llamar Log_Print(TAG, msg).
  *
  * @date    July 03, 2026
  * @author  César Pérez
@@ -42,6 +49,14 @@ extern "C" {
 void Log_Init(void);
 
 /**
+ * @brief  Crea el mutex del Logger.
+ * @note   Llamar UNA vez, despues de osKernelInitialize() y antes de
+ *         osKernelStart() (kernel inicializado pero scheduler sin correr
+ *         todavia — es seguro crear el mutex ahi, NO es seguro tomarlo).
+ */
+void Log_InitMutex(void);
+
+/**
  * @brief  Prints a tagged log message over USB CDC.
  * @param  tag  Short module identifier, e.g. "BT", "I2C", "TEST".
  * @param  msg  Message string (NUL-terminated).
@@ -60,6 +75,12 @@ void Log_Print(const char *tag, const char *msg);
  * Output format:  [TAG] formatted message\r\n
  */
 void Log_Printf(const char *tag, const char *fmt, ...);
+
+/**
+ * @brief  Imprime una linea en blanco (sin tag), util para separar bloques
+ *         de log de distintos modulos.
+ */
+void Log_Blank(void);
 
 #ifdef __cplusplus
 }

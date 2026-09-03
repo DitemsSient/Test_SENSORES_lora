@@ -52,15 +52,16 @@ Pendiente aparte: `Gps_ForceOn()`/`Gps_ForceOff()` en `GPS.c` mueven el pin
 dejar de manejar ese pin por software para este módulo, o confirmar si el
 L76-L tiene un verdadero `FORCE_ON` en otro pin.
 
-## 3. Limpieza del receptor infrarrojo — en curso
+## 3. Limpieza del receptor infrarrojo — concluida
 
-**Estado:** en curso (2026-08-27)
+**Estado:** concluida (2026-08-27)
 
-Se valida la captura por EXTI + `DWT->CYCCNT` (sin Timer Input Capture,
-este MCU/encapsulado no tiene un timer libre con canal IC disponible) como
-la forma definitiva de leer el TSOP. Se está reemplazando la librería de
-prueba (`Recepcion_TEST.h/.c`) por un driver de producción
-(`Receptor_Infrarrojo_EXTI.h/.c`), y dejando `Receptor_Infrarrojo_TSOP.h/.c`
-(la versión basada en Timer Input Capture) como referencia/dato histórico,
-comentada y fuera de compilación — ver el encabezado de esos archivos para
-el detalle de por qué no se usa en este hardware.
+Captura por EXTI + `DWT->CYCCNT` (sin Timer Input Capture, este
+MCU/encapsulado no tiene un timer libre con canal IC disponible) es la
+forma definitiva de leer el TSOP: `Receptor_Infrarrojo_EXTI.h/.c`.
+`Receptor_Infrarrojo_TSOP.h/.c` (version por Timer Input Capture) se
+eliminó del árbol de trabajo — definía `IR_Process` con el mismo nombre
+que el driver nuevo, causando `multiple definition` al linkear (CubeIDE
+compila todo `Core/Src`, sin importar si algo lo incluye). Sigue
+disponible en el historial de git (commit `05cda7e`) si hace falta
+consultarlo.

@@ -94,7 +94,14 @@ void IR_EXTI_Callback(Ir_Handle_t *h) {
         return;
     }
 
-    /* Fin de SPACE — clasifica y acumula. */
+    /* Fin de SPACE — guarda el delta crudo (diagnostico) y clasifica. */
+    if (h->raw_count < IR_RAW_MAX) {
+        h->raw_dt[h->raw_count] = (delta_us < 0xFFFFU) ? (uint16_t)delta_us : 0xFFFFU;
+        h->raw_count++;
+    } else {
+        h->raw_overflow = true;
+    }
+
     if (delta_us < IR_BIT0_MAX_US) {
         IR_PushBit(h, 0U);
     } else if (delta_us < IR_BIT1_MAX_US) {
@@ -115,7 +122,7 @@ void IR_EXTI_Callback(Ir_Handle_t *h) {
 IrStatus_e IR_Process(Ir_Handle_t *h) {
     if (h == NULL) return IR_ERR_PARAM;
     if (h->frame_ready) return IR_OK;
-    if (h->frame_len == 0U) return IR_ERR_NO_FRAME;
+    if (h->raw_count == 0U) return IR_ERR_NO_FRAME;
 
     uint32_t elapsed_ms = HAL_GetTick() - h->last_edge_tick;
     if (elapsed_ms < IR_SILENCE_MS) return IR_ERR_NO_FRAME;
@@ -131,6 +138,8 @@ void IR_Reset(Ir_Handle_t *h) {
     h->frame_overflow = false;
     h->current_byte   = 0U;
     h->bit_count      = 0U;
+    h->raw_count      = 0U;
+    h->raw_overflow   = false;
     h->frame_ready    = false;
     h->first_edge     = true;
 }

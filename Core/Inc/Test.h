@@ -52,6 +52,16 @@ extern "C" {
 /* --- Un solo disparo, bloqueante --- */
 
 /**
+ * @brief  Escanea el bus I2C1 completo (direcciones 0x08-0x77, 7 bits) con
+ *         HAL_I2C_IsDeviceReady() e imprime por el Logger cada direccion
+ *         que responda.
+ * @note   Bloqueante (~1-2 s). No requiere que haya nada conectado — una
+ *         direccion sin dispositivo simplemente no responde (NACK) y el
+ *         scan sigue con la siguiente, sin desincronizar el bus.
+ */
+void Test_I2C_Scan(void);
+
+/**
  * @brief  Prueba el Buzzer: Buzzer_Init() + una melodia corta (ode_to_joy).
  * @note   Bloqueante (~10 s). Confirmacion visual/auditiva por el usuario.
  */

@@ -36,9 +36,9 @@ extern UART_HandleTypeDef huart1;   /* GPS_UART = &huart1, ver GPS.h */
  *   reservados, sin funcionalidad UART. El Logger se reasigno temporalmente
  *   a huart3 (USART3, Bluetooth) y luego a USB CDC (ver Logger.h actual).
  *
- * - Tarea 2 — Escaneo de bus I2C1: confirmado por poleo con
- *   HAL_I2C_IsDeviceReady() en las 128 direcciones de 7 bits. Direcciones
- *   encontradas: 0x30 (MMC5983MA), 0x32 (LP55231 RGB), 0x39 (SensorLuz
+ * - Tarea 2 — Escaneo de bus I2C1: reimplementada como Test_I2C_Scan() (SI
+ *   tiene codigo funcional, no es solo historial). Direcciones encontradas
+ *   la ultima vez: 0x30 (MMC5983MA), 0x32 (LP55231 RGB), 0x39 (SensorLuz
  *   TSL2571), 0x55 (BatteryMonitor BQ27441), 0x6A (LSM6DSO32TR IMU).
  *
  * - Tarea 6 — LoRa (RM1262/KG200Z) AT por poleo: se mandaba "AT\r\n" cada
@@ -63,6 +63,20 @@ static Ir_Handle_t test_ir;
 /* ================================  API  =================================== */
 
 /* Public functions declared in the .h */
+
+void Test_I2C_Scan(void) {
+    Log_Print("TEST", "I2C: escaneando bus 0x08-0x77...");
+
+    uint8_t found = 0U;
+    for (uint8_t addr7 = 0x08U; addr7 <= 0x77U; addr7++) {
+        if (HAL_I2C_IsDeviceReady(&hi2c1, (uint16_t)(addr7 << 1U), 2U, 5U) == HAL_OK) {
+            Log_Printf("TEST", "I2C: dispositivo en 0x%02X", addr7);
+            found++;
+        }
+    }
+
+    Log_Printf("TEST", "I2C: escaneo terminado, %u dispositivo(s)", found);
+}
 
 void Test_Buzzer(void) {
     Buzzer_Init();
@@ -151,39 +165,21 @@ void Test_IR_Init(void) {
 void Test_IR_Poll(void) {
     if (IR_Process(&test_ir) != IR_OK) return;
 
-    char hex[3U * IR_FRAME_MAX_BYTES + 1U];
-    uint16_t pos = 0U;
-    for (uint8_t i = 0U; i < test_ir.frame_len; i++) {
-        pos += (uint16_t)snprintf(&hex[pos], sizeof(hex) - pos, "%02X ",
-                                   test_ir.frame_buf[i]);
+    /* Solo tiempos crudos, tal como llegan — sin traducir nada todavia. */
+    Log_Printf("IR", "----- trama: %u deltas -----", test_ir.raw_count);
+    for (uint16_t i = 0U; i < test_ir.raw_count; i++) {
+        Log_Printf("IR", "[%u] %u us", i, test_ir.raw_dt[i]);
     }
-    hex[pos] = '\0';
+    if (test_ir.raw_overflow) {
+        Log_Print("IR", "buffer de tiempos lleno — la trama pudo haberse cortado");
+    }
 
-    Log_Printf("IR", "trama (%u bytes): %s%s", test_ir.frame_len, hex,
-               test_ir.frame_overflow ? " (overflow)" : "");
     IR_Reset(&test_ir);
 }
 
 /* ======================  HAL WEAK CALLBACKS  =============================== */
 
-/**
- * @brief  HAL weak callback — recepcion completa por UART. Solo huart1
- *         (GPS_UART) esta armado por interrupcion en esta libreria.
- * @note   Trabajo minimo: Gps_StoreByte() ya rearma el siguiente byte solo.
- */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-    if (huart->Instance == GPS_UART->Instance) {
-        Gps_StoreByte(&test_gps);
-    }
-}
-
-/**
- * @brief  HAL weak callback — EXTI de cualquier pin armado. Solo el pin del
- *         TSOP (IR_TSOP_PIN) esta armado por esta libreria.
- * @note   Trabajo minimo: nada de Log_Print/Log_Printf aqui adentro.
- */
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
-    if (GPIO_Pin == IR_TSOP_PIN) {
-        IR_EXTI_Callback(&test_ir);
-    }
-}
+/* HAL_UART_RxCpltCallback() y HAL_GPIO_EXTI_Callback() se movieron a
+ * Inicializacion.c — GPS y el receptor IR ya son parte del arranque real
+ * (INIT_GPS_ENABLE / INIT_RX_IR_ENABLE), no solo de pruebas. Un solo weak
+ * override por funcion en todo el link, no redefinirlos aqui. */

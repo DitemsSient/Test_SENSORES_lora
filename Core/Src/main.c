@@ -18,13 +18,14 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 #include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "Inicializacion.h"
 #include "Logger.h"
-#include "Driver_RGB.h"
-#include "Bootloader.h"
+#include "I2C1_Bus.h"
 #include "Test.h"
 /* USER CODE END Includes */
 
@@ -56,11 +57,16 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 512 * 4,   /* 2KB — subido del default de CubeMX (128*4=512B) */
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
 /* USER CODE BEGIN PV */
-/* Handle del LP55231. NO estatico — Bootloader.c lo referencia con
- * "extern LP55231_t rgb;". Se queda aqui mientras se arma la libreria de
- * Inicializacion (ver Core/Doc/Pendientes.md). */
-LP55231_t rgb;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -74,6 +80,8 @@ static void MX_TIM1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_USART3_UART_Init(void);
+void StartDefaultTask(void *argument);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -134,76 +142,51 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
-  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
 
-  /* ===================  RGB (LP55231) — SIEMPRE primero  ==================
-   * Debe quedar listo antes de Bootloader_CheckAndEnter() y del indicador
-   * verde/azul de abajo, que lo usan para dar retroalimentacion visual.
-   */
-  LP55231_Attach(&rgb, &hi2c1, LP55231_ADDR_7BIT, 100U);
-  LP55231_Begin(&rgb);
-  HAL_Delay(2U);
-  LP55231_Enable(&rgb);
-  /* ======================================================================= */
+  Inicializacion_Run();
 
-  /* ===================  BOOTLOADER — SIEMPRE segundo  ======================
-   * PB1 Y PB2 en bajo (los dos) = salta al bootloader USB DFU (no regresa,
-   * parpadea rojo par1/D2 antes de saltar — logica adentro de Bootloader.c).
-   * Si no entra, no toca el LED — lo decidimos aqui abajo (verde/azul).
-   */
-  Bootloader_CheckAndEnter();
-  Log_Init();
-  /* ======================================================================= */
-
-  /* ===================  INDICADOR + LOGGER: segun PB2  ====================
-   * SEL_PROG_MCU_FTDI (PB2) decide si el conector USB-C esta conectado al
-   * periferico USB del propio MCU (0) o al FTDI (1, switch U10) — ver
-   * esquematico.
-   *   PB2 = 0 (modo Logger, USB al MCU) -> parpadea VERDE (par1/D1) y
-   *          llama Log_Init().
-   *   PB2 = 1 (modo FTDI, USB desconectado del MCU) -> parpadea AZUL
-   *          (par1/D7, mismo par) y NO llama Log_Init() — no tiene caso,
-   *          y ademas moverse de PB2 a mitad de sesion con el Logger ya
-   *          inicializado deja la conexion en un estado que solo se
-   *          recupera reconectando el cable USB.
-   *
-   * OJO: si PB2=1, Log_Init() nunca se llamo — todas las tareas de abajo
-   * que usan Log_Print/Log_Printf simplemente no van a imprimir nada (no
-   * truena, solo se quedan calladas). No es un bug, es lo esperado.
-   */
-  {
-      bool pb2_logger_mode = (HAL_GPIO_ReadPin(BOOTLOADER_BTN_PORT, BOOTLOADER_BTN_PIN) == GPIO_PIN_RESET);
-      /* DIAGNOSTICO TEMPORAL: colores invertidos con el bootloader (que ahora
-       * parpadea verde en vez de rojo) para poder distinguir a simple vista
-       * si el firmware recien flasheado de verdad es el que esta corriendo.
-       * Revertir a 0U (verde) cuando se confirme. */
-      uint8_t led_ch = pb2_logger_mode ? 1U : 6U;  /* D2 (rojo) o D7 (azul) */
-
-      for (uint8_t i = 0U; i < BOOTLOADER_LED_BLINK_COUNT; i++) {
-          LP55231_SetChannelPWM(&rgb, led_ch, 0xFFU);
-          HAL_Delay(BOOTLOADER_LED_BLINK_MS);
-          LP55231_SetChannelPWM(&rgb, led_ch, 0x00U);
-          HAL_Delay(BOOTLOADER_LED_BLINK_MS);
-      }
-
-      if (pb2_logger_mode) {
-          Log_Init();
-      }
-  }
-  /* ======================================================================= */
-
-  /* Todo el codigo de prueba por periferico (Buzzer, Motovibrador, Flash,
-   * LoRa, GPS, IR, I2C, RGB) vive ahora en Test.h/Test.c — ver ese archivo
-   * para el detalle de cada Test_X() y el historial de las tareas de
-   * bring-up ya concluidas. Llamar aqui la que se necesite, ej.:
-   *
-   *   Test_GPS_Init();
-   *
-   * y su _Poll() correspondiente (si aplica) en el while(1) de abajo.
-   */
+  // Test_IR_Init();   /* PRUEBA IR — en pausa */
 
   /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* kernel inicializado, scheduler sin correr aun — seguro crear mutex aqui */
+  Log_InitMutex();
+  I2C1Bus_InitMutex();
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -212,7 +195,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* Ej.: Test_GPS_Poll(); */
+    // Test_IR_Poll();   /* PRUEBA IR — en pausa */
   }
   /* USER CODE END 3 */
 }
@@ -717,7 +700,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
@@ -727,12 +710,59 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-/* HAL_GPIO_EXTI_Callback() y HAL_UART_RxCpltCallback() se movieron a
- * Test.c — los usan Test_IR_Poll()/Test_GPS_Poll(). No redefinirlos aqui
- * mientras Test.c este en el proyecto (un solo weak override por funcion
- * en todo el link). */
+/* HAL_GPIO_EXTI_Callback(), HAL_UART_RxCpltCallback() y
+ * HAL_UART_ErrorCallback() viven en Inicializacion.c (GPS/IR ya son parte
+ * del arranque real). No redefinirlos aqui — un solo weak override por
+ * funcion en todo el link. */
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* init code for USB_DEVICE */
+  /* MX_USB_DEVICE_Init() ya se llama dentro de Inicializacion_Run() (antes
+   * del kernel, despues de la decision de bootloader) — NO llamarlo aqui
+   * tambien, se doble-inicializaria. OJO: esta linea la regenera CubeMX
+   * fuera de bloques USER CODE; si se regenera el .ioc, hay que volver a
+   * comentarla. */
+  // MX_USB_DEVICE_Init();
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END 5 */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM7 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM7)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.

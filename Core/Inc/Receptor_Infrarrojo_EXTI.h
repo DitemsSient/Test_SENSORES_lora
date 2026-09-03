@@ -75,6 +75,7 @@ extern "C" {
 
 #define IR_BITS_PER_BYTE         8U
 #define IR_FRAME_MAX_BYTES       16U     /**< Cuantos bytes decodificados caben por trama */
+#define IR_RAW_MAX               128U    /**< Cuantos deltas crudos (us) se guardan por trama */
 
 /* ========================  ENUMERATIONS  ================================== */
 
@@ -98,6 +99,10 @@ typedef struct {
     volatile uint8_t  frame_buf[IR_FRAME_MAX_BYTES]; /**< Bytes decodificados        */
     volatile uint8_t  frame_len;                     /**< Bytes validos en frame_buf */
     volatile bool     frame_overflow;                /**< true si no cupo un byte    */
+
+    volatile uint16_t raw_dt[IR_RAW_MAX]; /**< Deltas de SPACE crudos, en us (diagnostico) */
+    volatile uint16_t raw_count;          /**< Cuantos deltas hay guardados en raw_dt      */
+    volatile bool     raw_overflow;       /**< true si no cupo un delta                    */
 
     bool     frame_ready;                 /**< true cuando IR_Process() detecta silencio */
 } Ir_Handle_t;
