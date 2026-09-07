@@ -13,6 +13,7 @@
 #include "Bluetooth.h"
 #include "Logger.h"
 #include <string.h>
+#include <stdio.h>
 
 /* ========================  EXTERNAL HAL HANDLES  ========================== */
 
@@ -109,14 +110,17 @@ void Bt_ResetRx(Bt_Handle_t *h)
 
 /* ========================  ADVERTISE API  ================================ */
 
-BtStatus_e Bt_SendAdvertise(Bt_Handle_t *h)
+BtStatus_e Bt_SendAdvertise(Bt_Handle_t *h, const char *mac_ap)
 {
-    if (h == NULL) { return BT_ERR_PARAM; }
+    if (h == NULL || mac_ap == NULL) { return BT_ERR_PARAM; }
 
-    Log_Print("BT", "Iniciando modo advertising ($CON)...");
-    static const uint8_t cmd[] = "$CON\r";
+    char cmd[48];
+    int  n = snprintf(cmd, sizeof(cmd), "$CON%s\r", mac_ap);
+    if (n <= 0 || (size_t)n >= sizeof(cmd)) { return BT_ERR_PARAM; }
+
+    Log_Printf("BT", "Iniciando modo advertising ($CON%s)...", mac_ap);
     Bt_ResetRx(h);
-    return Bt_Transmit(h, cmd, sizeof(cmd) - 1U);
+    return Bt_Transmit(h, (uint8_t *)cmd, (uint16_t)n);
 }
 
 /* ========================  SELF-TEST  ==================================== */

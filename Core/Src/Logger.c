@@ -4,7 +4,7 @@
  *
  * @date    July 03, 2026
  * @author  César Pérez
- * @version 2.0.0
+ * @version 3.0.0
  */
 
 #include "Logger.h"
@@ -21,8 +21,17 @@ extern USBD_HandleTypeDef hUsbDeviceFS;
 
 /* ========================  PRIVATE STATE  ================================= */
 
-static bool        s_ready = false;
-static osMutexId_t s_mutex = NULL;   /* NULL hasta Log_InitMutex() — ver Logger.h */
+static bool s_ready = false;
+
+/* Entrada de la cola — copia ya formateada de una linea, lista para
+ * transmitir tal cual por Log_Task(). */
+typedef struct {
+    char     line[LOG_MAX_MSG_LEN];
+    uint16_t len;
+} LogEntry_t;
+
+static osMessageQueueId_t s_queue   = NULL;   /* NULL hasta Log_InitQueue() */
+static uint32_t           s_dropped = 0U;     /* Lineas perdidas por cola llena — solo debug */
 
 /* ======================  STATIC FUNCTIONS  ================================ */
 
@@ -60,6 +69,37 @@ static void Log_TransmitUSB(uint8_t *data, uint16_t len) {
     }
 }
 
+/**
+ * @brief  Encola una linea ya formateada, o la manda directo si la cola
+ *         todavia no existe (arranque bare-metal, ver Logger.h).
+ * @param  data  Linea a mandar (sin necesidad de NUL — se copia por len).
+ * @param  len   Bytes en data.
+ */
+static void Log_Enqueue(const char *data, uint16_t len)
+{
+    if (s_queue == NULL) {
+        /* Bare-metal, antes de Log_InitQueue() — un solo hilo de ejecucion
+         * en este punto (Inicializacion_Run()), directo y bloqueante como
+         * antes. */
+        Log_TransmitUSB((uint8_t *)data, len);
+        return;
+    }
+
+    LogEntry_t entry;
+    uint16_t copy_len = (len < (uint16_t)(sizeof(entry.line) - 1U))
+                         ? len : (uint16_t)(sizeof(entry.line) - 1U);
+    memcpy(entry.line, data, copy_len);
+    entry.len = copy_len;
+
+    /* Timeout 0: nunca bloquear a quien llama por un log. Si la cola esta
+     * llena (Log_Task mas lenta que la rafaga de productores), se
+     * descarta y se cuenta — jamas se detiene una tarea de tiempo real
+     * por esto. */
+    if (osMessageQueuePut(s_queue, &entry, 0U, 0U) != osOK) {
+        s_dropped++;
+    }
+}
+
 /* ========================  PUBLIC FUNCTIONS  =============================== */
 
 void Log_Init(void)
@@ -67,9 +107,9 @@ void Log_Init(void)
     s_ready = true;
 }
 
-void Log_InitMutex(void)
+void Log_InitQueue(void)
 {
-    s_mutex = osMutexNew(NULL);
+    s_queue = osMessageQueueNew(LOG_QUEUE_DEPTH, sizeof(LogEntry_t), NULL);
 }
 
 void Log_Print(const char *tag, const char *msg)
@@ -88,9 +128,7 @@ void Log_Print(const char *tag, const char *msg)
         len = (int)sizeof(out) - 1;
     }
 
-    if (s_mutex != NULL) osMutexAcquire(s_mutex, osWaitForever);
-    Log_TransmitUSB((uint8_t *)out, (uint16_t)len);
-    if (s_mutex != NULL) osMutexRelease(s_mutex);
+    Log_Enqueue(out, (uint16_t)len);
 }
 
 void Log_Blank(void)
@@ -99,9 +137,7 @@ void Log_Blank(void)
         return;
     }
 
-    if (s_mutex != NULL) osMutexAcquire(s_mutex, osWaitForever);
-    Log_TransmitUSB((uint8_t *)"\r\n", 2U);
-    if (s_mutex != NULL) osMutexRelease(s_mutex);
+    Log_Enqueue("\r\n", 2U);
 }
 
 void Log_Printf(const char *tag, const char *fmt, ...)
@@ -118,4 +154,16 @@ void Log_Printf(const char *tag, const char *fmt, ...)
     va_end(args);
 
     Log_Print(tag, msg);
+}
+
+void Log_Task(void *argument)
+{
+    (void)argument;
+
+    LogEntry_t entry;
+    for (;;) {
+        if (osMessageQueueGet(s_queue, &entry, NULL, osWaitForever) == osOK) {
+            Log_TransmitUSB((uint8_t *)entry.line, entry.len);
+        }
+    }
 }

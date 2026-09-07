@@ -111,11 +111,13 @@
 #define INIT_LED_BLINK_COUNT         3U
 
 /* Prueba de arcoiris: los 3 pares fisicos (D1/D2/D7, D3/D4/D8, D5/D6/D9) a
- * la vez — mismo rol por posicion (verde/rojo/azul) en los tres. */
+ * la vez — mismo rol por posicion (verde/rojo/azul) en los tres. NO
+ * estaticos — Tareas.c los referencia con "extern" para el parpadeo
+ * magenta de CalibrateTask (mismo patron que "rgb" un poco mas abajo). */
 #define INIT_RAINBOW_STEP_MS         600U
-static const uint8_t s_rgb_green_ch[3] = { 0U, 2U, 4U };  /* D1, D3, D5 */
-static const uint8_t s_rgb_red_ch[3]   = { 1U, 3U, 5U };  /* D2, D4, D6 */
-static const uint8_t s_rgb_blue_ch[3]  = { 6U, 7U, 8U };  /* D7, D8, D9 */
+const uint8_t rgb_green_ch[3] = { 0U, 2U, 4U };  /* D1, D3, D5 */
+const uint8_t rgb_red_ch[3]   = { 1U, 3U, 5U };  /* D2, D4, D6 */
+const uint8_t rgb_blue_ch[3]  = { 6U, 7U, 8U };  /* D7, D8, D9 */
 
 typedef struct {
     uint8_t     r, g, b;
@@ -139,6 +141,9 @@ extern I2C_HandleTypeDef hi2c1;   /* I2C1 — siempre inicializado por MX_I2C1_I
 
 #if INIT_BLUETOOTH_ENABLE
 extern UART_HandleTypeDef huart3;   /* BT_UART = &huart3, ver Bluetooth.h */
+/* Handle real de BluetoothTask (Tareas.c, no estatico ahi) — el callback
+ * de abajo despacha aqui los bytes de huart3 mientras esa tarea vive. */
+extern Bt_Handle_t s_bt_task;
 #endif
 
 #if INIT_GPS_ENABLE
@@ -170,7 +175,11 @@ static Bt_Handle_t s_bt;
 #endif
 
 #if INIT_RX_IR_ENABLE
-static Ir_Handle_t s_ir;
+/* Handle de IR — NO estatico — CalibrateTask (Tareas.c) lo consume via
+ * "extern Ir_Handle_t ir_handle;". IR_Init() ya corre aqui, antes del
+ * RTOS, asi que para cuando CalibrateTask arranca el handle ya esta listo
+ * — a diferencia de GPS/Sensores no hace falta reinicializarlo en la tarea. */
+Ir_Handle_t ir_handle;
 #endif
 
 #if INIT_GPS_ENABLE
@@ -196,6 +205,50 @@ static const I2cDevice_t s_i2c_expected[] = {
 };
 #define I2C_EXPECTED_COUNT   (sizeof(s_i2c_expected) / sizeof(s_i2c_expected[0]))
 #define I2C_FOUND_MAX         16U
+
+/* Diagnostico, modo de operacion y datos de partida — declarados extern en
+ * Inicializacion.h, definidos aqui (no estaticos: SensorsTask en Tareas.c
+ * escribe en g_exercise_data, y BluetoothTask escribira en
+ * g_modo_operacion mas adelante). */
+Diagnostico_t Diagnostico = {0};
+
+/* Nace siempre en MODO_CONFIGURACION — ver Modo_SetOperacion(). */
+ModoOperacion_e g_modo_operacion = MODO_CONFIGURACION;
+
+/* [PRUEBA] Simula haber recibido ya "$CONF1,3,EQUIPO7,PETRAA,10,100,60,
+ * 01F51DDE41B911\r" por LoRa — LoraTask todavia no existe, asi que
+ * precargamos la estructura tal cual quedaria despues de parsear ese
+ * mensaje, para poder probar el intercambio con Bluetooth de forma
+ * aislada. Quitar/reemplazar cuando exista LoraTask real. */
+ExerciseGameData_t g_exercise_data = {
+    .orden       = 1U,
+    .lora        = 3U,
+    .team_name   = "EQUIPO7",
+    .player_name = "PETRAA",
+    .lives       = 10U,
+    .ammo        = 100U,
+    .tiempo      = 60U,
+    .mac         = "01F51DDE41B911",
+    .lvBatery    = 100U,
+};
+
+/* Prioridades NVIC — FIJAS, no se intercambian en runtime (decision
+ * 2026-09-04, ver Modo_SetOperacion()):
+ *   EXTI0_IRQn  (recepcion IR de disparos) = 0  — fuera del rango que le
+ *     importa a FreeRTOS (configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY=5,
+ *     ver FreeRTOSConfig.h). Valido SOLO porque IR_EXTI_Callback no toca
+ *     nada de la API de FreeRTOS (ni Log_Print, ni mutex/colas) — si algun
+ *     dia esa ISR necesita tocar RTOS, esto deja de ser seguro.
+ *   USART2_IRQn (recepcion LoRa) = 5 — la prioridad mas alta DENTRO del
+ *     rango seguro para RTOS. Se queda ahi siempre: la IR en 0 la
+ *     preemptea de todos modos cuando hace falta, pero su ISR es de
+ *     microsegundos (EXTI+DWT sin bloqueos) — el costo de esa preemption
+ *     es insignificante contra el tiempo de un byte UART, no hay riesgo
+ *     real de overrun. No hace falta bajarla en MODO_EJERCICIO.
+ *   Todo lo demas (Bluetooth USART3, RS485 UART4, etc.) = 6.
+ * Configuradas fijas en el NVIC (main.c / stm32l4xx_hal_msp.c via CubeMX,
+ * EXTI0 en 0 hay que ponerlo tambien en el panel NVIC del .ioc para que
+ * sobreviva la regeneracion). */
 
 /* ================================  API  =================================== */
 
@@ -266,6 +319,7 @@ void Inicializacion_Run(void) {
     HAL_Delay(INIT_USB_ENUM_DELAY_MS);
 
     Log_Init();
+    Log_Blank();   /* separa el arranque de lo que haya quedado en la terminal */
     Inicializacion_PrintBanner();
 #if INIT_BOOTLOADER_ENABLE
     Log_Printf("SIENT", "Modo detectado: %s", mode_name);
@@ -275,7 +329,7 @@ void Inicializacion_Run(void) {
 
 #if INIT_USB_LOGGER_ENABLE
     Log_Blank();
-    Search_Disp_I2C();
+    Diagnostico.i2c_completo = Search_Disp_I2C();
     HAL_Delay(INIT_STEP_DELAY_MS);
 #endif
 
@@ -283,6 +337,7 @@ void Inicializacion_Run(void) {
     Log_Blank();
     Log_Print("MOTOVIBRADOR", "Inicializando...");
     Vibrator_Init();
+    Diagnostico.motovibrador = true;   /* Vibrator_Init() no regresa status */
     Log_Print("MOTOVIBRADOR", "Motovibrador inicializado correctamente.");
     HAL_Delay(INIT_STEP_DELAY_MS);
 #endif
@@ -291,6 +346,7 @@ void Inicializacion_Run(void) {
     Log_Blank();
     Log_Print("BUZZER", "Inicializando...");
     Buzzer_Init();
+    Diagnostico.buzzer = true;   /* Buzzer_Init() no regresa status */
     Log_Print("BUZZER", "Buzzer inicializado correctamente.");
     Log_Print("BUZZER", "Sonando tono de alarma (2x)...");
     Buzzer_PlayMelody(alert, MELODY_LEN(alert), 160U);
@@ -324,6 +380,7 @@ void Inicializacion_Run(void) {
     }
 
     if (Flash_Init() == FLASH_OK) {
+        Diagnostico.flash = true;
         Log_Print("FLASH", "Flash inicializado correctamente.");
     } else {
         Log_Print("FLASH", "ERROR: fallo la inicializacion del Flash.");
@@ -335,6 +392,7 @@ void Inicializacion_Run(void) {
     Log_Blank();
     Log_Print("MAG", "Inicializando magnetometro MMC5983MA...");
     if (MMC5983MA_Init() == MMC_OK) {
+        Diagnostico.magnetometro = true;
         Log_Print("MAG", "Magnetometro inicializado correctamente.");
 
         /* Primera lectura, para confirmar a ojo que los datos tienen sentido. */
@@ -353,6 +411,7 @@ void Inicializacion_Run(void) {
     Log_Blank();
     Log_Print("IMU", "Inicializando IMU LSM6DSO32TR...");
     if (LSM6DSO32TR_Init(&s_imu) == LSM_OK) {
+        Diagnostico.imu = true;
         Log_Print("IMU", "IMU inicializado correctamente.");
 
         LSM_Data_t imu_data;
@@ -371,6 +430,7 @@ void Inicializacion_Run(void) {
     Log_Blank();
     Log_Print("BAT", "Inicializando BatteryMonitor BQ27441...");
     if (BatGauge_Init() == HAL_OK) {
+        Diagnostico.batterymonitor = true;
         Log_Print("BAT", "BatteryMonitor inicializado correctamente.");
 
         BatGauge_Data_t bat_data;
@@ -390,6 +450,7 @@ void Inicializacion_Run(void) {
     Log_Print("LUZ", "Inicializando sensor de luz TSL2571...");
     TSL2571_Attach(&s_light, &hi2c1, TSL2571_ADDR_7BIT, 100U);
     if (TSL2571_Begin(&s_light, 0xC0U, TSL2571_GAIN_1X) == HAL_OK) {
+        Diagnostico.sensorluz = true;
         Log_Print("LUZ", "Sensor de luz inicializado correctamente.");
 
         float lux = 0.0f;
@@ -425,6 +486,7 @@ void Inicializacion_Run(void) {
         HAL_UART_Receive(s_bt.huart, bt_resp, sizeof(bt_resp) - 1U, BT_RX_TIMEOUT_MS);
 
         bool bt_ok = (strstr((char *)bt_resp, "00") != NULL);
+        Diagnostico.bluetooth = bt_ok;
         if (bt_ok) {
             Log_Print("BT", "BLE responde OK (00) — modulo sano.");
         } else {
@@ -438,6 +500,20 @@ void Inicializacion_Run(void) {
             memset(bt_resp, 0, sizeof(bt_resp));
             HAL_UART_Receive(s_bt.huart, bt_resp, sizeof(bt_resp) - 1U, BT_RX_TIMEOUT_MS);
             Log_Printf("BT", "Firmware: %s", (char *)bt_resp);
+
+            /* Arranca nuestro programa/script en el modulo — solo si el BT
+             * salio sano arriba. Antes de crear las tareas, para que
+             * BluetoothTask ya se encuentre el modulo corriendo. */
+            Log_Print("BT", "Arrancando programa SensoresM (AT+RUN)...");
+            static const uint8_t cmd_run[] = "AT+RUN \"SensoresM\"\r";
+            Bt_Transmit(&s_bt, cmd_run, sizeof(cmd_run) - 1U);
+            memset(bt_resp, 0, sizeof(bt_resp));
+            HAL_UART_Receive(s_bt.huart, bt_resp, sizeof(bt_resp) - 1U, BT_RX_TIMEOUT_MS);
+            if (strstr((char *)bt_resp, "00") != NULL) {
+                Log_Print("BT", "SensoresM arrancado (00).");
+            } else {
+                Log_Printf("BT", "ERROR: AT+RUN no respondio 00: %s", (char *)bt_resp);
+            }
         }
     }
     HAL_Delay(INIT_STEP_DELAY_MS);
@@ -454,6 +530,7 @@ void Inicializacion_Run(void) {
     HAL_Delay(600U);
 
     if ((s_lora.rx_count > 0U) && (strstr((char *)s_lora.rx_buffer, "OK") != NULL)) {
+        Diagnostico.lora = true;
         Log_Print("LORA", "Comunicacion exitosa, se recibio OK.");
     } else {
         Log_Print("LORA", "ERROR: no se recibio OK — revisar USART2/modulo.");
@@ -464,7 +541,8 @@ void Inicializacion_Run(void) {
 #if INIT_RX_IR_ENABLE
     Log_Blank();
     Log_Print("RX_IR", "Inicializando receptor IR (EXTI+DWT)...");
-    IR_Init(&s_ir);
+    IR_Init(&ir_handle);
+    Diagnostico.rx_ir = true;   /* Solo init — sin transmisor externo no hay forma de autoverificar */
     Log_Print("RX_IR", "Receptor IR listo — no se hace poll aqui, requiere un transmisor externo disparando.");
     HAL_Delay(INIT_STEP_DELAY_MS);
 #endif
@@ -475,15 +553,16 @@ void Inicializacion_Run(void) {
     for (uint8_t i = 0U; i < INIT_RAINBOW_COLOR_COUNT; i++) {
         const InitRgbColor_t *c = &s_rainbow[i];
         for (uint8_t j = 0U; j < 3U; j++) {
-            LP55231_SetChannelPWM(&rgb, s_rgb_red_ch[j],   c->r ? 0xFFU : 0x00U);
-            LP55231_SetChannelPWM(&rgb, s_rgb_green_ch[j], c->g ? 0xFFU : 0x00U);
-            LP55231_SetChannelPWM(&rgb, s_rgb_blue_ch[j],  c->b ? 0xFFU : 0x00U);
+            LP55231_SetChannelPWM(&rgb, rgb_red_ch[j],   c->r ? 0xFFU : 0x00U);
+            LP55231_SetChannelPWM(&rgb, rgb_green_ch[j], c->g ? 0xFFU : 0x00U);
+            LP55231_SetChannelPWM(&rgb, rgb_blue_ch[j],  c->b ? 0xFFU : 0x00U);
         }
         HAL_Delay(INIT_RAINBOW_STEP_MS);
     }
     for (uint8_t ch = 0U; ch < LP55231_NUM_CHANNELS; ch++) {
         LP55231_SetChannelPWM(&rgb, ch, 0x00U);
     }
+    Diagnostico.rgb = true;
     Log_Print("RGB", "Prueba de arcoiris terminada.");
     HAL_Delay(INIT_STEP_DELAY_MS);
 #endif
@@ -494,8 +573,8 @@ void Inicializacion_Run(void) {
     Gps_Init(&s_gps);
     HAL_Delay(200U);
     Gps_SendMTK(&s_gps, GPS_OUTPUT_RMC_GGA);
-    Gps_SendMTK(&s_gps, GPS_FIX_1HZ);
-    Log_Print("GPS", "Configurado (RMC+GGA a 1Hz). Esperando tramas...");
+    Gps_SendMTK(&s_gps, GPS_FIX_0_5HZ);
+    Log_Print("GPS", "Configurado (RMC+GGA a 0.5Hz, cada 2s). Esperando tramas...");
 
     /* No exigimos fix (dificil en interiores) — solo confirmamos que estan
      * llegando bytes reales del modulo, imprimiendo un par de tramas NMEA
@@ -513,6 +592,7 @@ void Inicializacion_Run(void) {
     if (gps_lines_printed == 0U) {
         Log_Print("GPS", "ERROR: no se recibio ninguna trama NMEA — revisar USART1/modulo.");
     } else {
+        Diagnostico.gps = true;
         Log_Print("GPS", "Comunicacion confirmada.");
     }
     HAL_Delay(INIT_STEP_DELAY_MS);
@@ -520,6 +600,32 @@ void Inicializacion_Run(void) {
 
     /* Mas pasos de inicializacion secuencial se agregan aqui conforme se
      * vayan habilitando mas drivers (ver los INIT_*_ENABLE arriba). */
+
+    /* Arranca siempre en MODO_CONFIGURACION. Las prioridades del NVIC
+     * (IR=0, LoRa=5, resto=6) son FIJAS y ya se configuran en el .ioc/NVIC
+     * de CubeMX — Modo_SetOperacion() ya no las toca, ver su comentario. */
+    Modo_SetOperacion(MODO_CONFIGURACION);
+
+#if INIT_USB_LOGGER_ENABLE
+    Log_Blank();
+    Diagnostico_Print();
+#endif
+
+#if INIT_RGB_ENABLE
+    /* Cierre del init: parpadeo en verde de los 3 pares fisicos a la vez
+     * (D1/D3/D5), a diferencia del parpadeo de bootloader que solo usa un
+     * par (D1). */
+    for (uint8_t i = 0U; i < INIT_LED_BLINK_COUNT; i++) {
+        for (uint8_t j = 0U; j < 3U; j++) {
+            LP55231_SetChannelPWM(&rgb, rgb_green_ch[j], 0xFFU);
+        }
+        HAL_Delay(INIT_LED_BLINK_MS);
+        for (uint8_t j = 0U; j < 3U; j++) {
+            LP55231_SetChannelPWM(&rgb, rgb_green_ch[j], 0x00U);
+        }
+        HAL_Delay(INIT_LED_BLINK_MS);
+    }
+#endif
 }
 
 void Inicializacion_PrintBanner(void) {
@@ -532,9 +638,10 @@ void Inicializacion_PrintBanner(void) {
 #endif
 }
 
-void Search_Disp_I2C(void) {
+bool Search_Disp_I2C(void) {
     uint8_t found[I2C_FOUND_MAX];
     uint8_t found_count = 0U;
+    uint8_t matched_count = 0U;
 
 #if INIT_USB_LOGGER_ENABLE
     Log_Print("I2C", "Escaneando bus I2C1...");
@@ -568,6 +675,10 @@ void Search_Disp_I2C(void) {
             }
         }
 
+        if (match) {
+            matched_count++;
+        }
+
 #if INIT_USB_LOGGER_ENABLE
         if (match) {
             Log_Printf("I2C", "0x%02X %s -> encontrado", expected_addr, s_i2c_expected[i].name);
@@ -576,6 +687,71 @@ void Search_Disp_I2C(void) {
         }
 #endif
     }
+
+    return (matched_count == I2C_EXPECTED_COUNT);
+}
+
+void Diagnostico_Print(void) {
+#if INIT_USB_LOGGER_ENABLE
+    Log_Print("DIAG", "---- Diagnostico de inicializacion ----");
+    Log_Printf("DIAG", "I2C completo:   %s", Diagnostico.i2c_completo   ? "OK" : "FALLO");
+    Log_Printf("DIAG", "Motovibrador:   %s", Diagnostico.motovibrador   ? "OK" : "FALLO");
+    Log_Printf("DIAG", "Buzzer:         %s", Diagnostico.buzzer         ? "OK" : "FALLO");
+    Log_Printf("DIAG", "Flash:          %s", Diagnostico.flash          ? "OK" : "FALLO");
+    Log_Printf("DIAG", "Magnetometro:   %s", Diagnostico.magnetometro   ? "OK" : "FALLO");
+    Log_Printf("DIAG", "IMU:            %s", Diagnostico.imu            ? "OK" : "FALLO");
+    Log_Printf("DIAG", "BatteryMonitor: %s", Diagnostico.batterymonitor ? "OK" : "FALLO");
+    Log_Printf("DIAG", "Sensor de luz:  %s", Diagnostico.sensorluz      ? "OK" : "FALLO");
+    Log_Printf("DIAG", "Bluetooth:      %s", Diagnostico.bluetooth      ? "OK" : "FALLO");
+    Log_Printf("DIAG", "LoRa:           %s", Diagnostico.lora           ? "OK" : "FALLO");
+    Log_Printf("DIAG", "RX_IR:          %s", Diagnostico.rx_ir          ? "OK" : "FALLO");
+    Log_Printf("DIAG", "RGB:            %s", Diagnostico.rgb            ? "OK" : "FALLO");
+    Log_Printf("DIAG", "GPS:            %s", Diagnostico.gps            ? "OK" : "FALLO");
+    Log_Print("DIAG", "----------------------------------------");
+#endif
+}
+
+void Inicializacion_PrintExerciseData(void) {
+#if INIT_USB_LOGGER_ENABLE
+    Log_Print("EXERCISE", "---- Datos de ejercicio ----");
+    Log_Printf("EXERCISE", "Orden: %u", g_exercise_data.orden);
+    Log_Printf("EXERCISE", "Lora: %u", g_exercise_data.lora);
+    Log_Printf("EXERCISE", "Equipo: %s", g_exercise_data.team_name);
+    Log_Printf("EXERCISE", "Alias: %s", g_exercise_data.player_name);
+    Log_Printf("EXERCISE", "Vidas: %u", g_exercise_data.lives);
+    Log_Printf("EXERCISE", "Balas: %u", g_exercise_data.ammo);
+    Log_Printf("EXERCISE", "Tiempo: %lu", (unsigned long)g_exercise_data.tiempo);
+    Log_Printf("EXERCISE", "MAC1: %s", g_exercise_data.mac);
+    Log_Printf("EXERCISE", "MAC2: %s", g_exercise_data.mac2);
+    Log_Print("EXERCISE", "-----------------------------");
+#endif
+}
+
+void Inicializacion_PrintSensorsData(void) {
+#if INIT_USB_LOGGER_ENABLE
+    Log_Print("SENSORS", "---- Lecturas de sensores ----");
+    Log_Printf("SENSORS", "Bateria: %u%%", g_exercise_data.lvBatery);
+    Log_Printf("SENSORS", "Lux: %.1f", g_exercise_data.lux);
+    Log_Printf("SENSORS", "Mag(uT): %.1f,%.1f,%.1f",
+               g_exercise_data.mag_x_uT, g_exercise_data.mag_y_uT, g_exercise_data.mag_z_uT);
+    Log_Printf("SENSORS", "Gyro(dps): %.1f,%.1f,%.1f",
+               g_exercise_data.gyro_x_dps, g_exercise_data.gyro_y_dps, g_exercise_data.gyro_z_dps);
+    Log_Print("SENSORS", "-------------------------------");
+#endif
+}
+
+void Modo_SetOperacion(ModoOperacion_e modo) {
+    g_modo_operacion = modo;
+
+    /* Las prioridades del NVIC son fijas (IR=0, LoRa=5, resto=6 — fijadas
+     * en el .ioc/NVIC de CubeMX, ver comentario mas arriba en este
+     * archivo) — esta funcion ya NO las toca. Solo lleva el estado del
+     * modo para la logica de negocio (que mensajes procesar, si el
+     * disparo IR cuenta para el marcador, etc.). */
+#if INIT_USB_LOGGER_ENABLE
+    Log_Printf("MODO", "Modo de operacion: %s",
+               (modo == MODO_EJERCICIO) ? "EJERCICIO" : "CONFIGURACION");
+#endif
 }
 
 /* ======================  HAL WEAK CALLBACKS  =============================== */
@@ -598,6 +774,16 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 #if INIT_LORA_ENABLE
     if (huart->Instance == LORA_UART->Instance) {
         Lora_StoreByte(&s_lora);
+        return;
+    }
+#endif
+#if INIT_BLUETOOTH_ENABLE
+    if (huart->Instance == BT_UART->Instance) {
+        /* s_bt_task (Tareas.c) — handle real de BluetoothTask, arma su
+         * propia recepcion IT con Bt_Init(). El "s_bt" de aqui arriba
+         * (smoke test de bring-up) usa HAL_UART_Receive() bloqueante, sin
+         * IT armada, asi que nunca compite con este despacho. */
+        Bt_StoreByte(&s_bt_task);
     }
 #endif
 }
@@ -630,6 +816,15 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
         __HAL_UART_CLEAR_FEFLAG(huart);
         __HAL_UART_CLEAR_NEFLAG(huart);
         HAL_UART_Receive_IT(huart, &s_lora.rx_byte, 1U);
+        return;
+    }
+#endif
+#if INIT_BLUETOOTH_ENABLE
+    if (huart->Instance == BT_UART->Instance) {
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        __HAL_UART_CLEAR_FEFLAG(huart);
+        __HAL_UART_CLEAR_NEFLAG(huart);
+        HAL_UART_Receive_IT(huart, &s_bt_task.rx_byte, 1U);
     }
 #endif
 }
@@ -642,7 +837,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
  */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
     if (GPIO_Pin == IR_TSOP_PIN) {
-        IR_EXTI_Callback(&s_ir);
+        IR_EXTI_Callback(&ir_handle);
     }
 }
 #endif

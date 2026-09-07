@@ -405,12 +405,14 @@ GpsStatus_e Gps_Process(Gps_Handle_t *h)
     return st;
 }
 
-void Gps_StoreByte(Gps_Handle_t *h)
+/**
+ * @brief  Framing state machine for a single incoming character — shared by
+ *         Gps_StoreByte() (IT, un byte a la vez) y Gps_StoreBytes() (DMA,
+ *         un bloque completo de golpe). No re-arma nada, eso lo hace cada
+ *         caller segun su propio modo de recepcion.
+ */
+static void Gps_StoreChar(Gps_Handle_t *h, char c)
 {
-    if (h == NULL) return;
-
-    char c = (char)h->rx_byte;
-
 #ifdef GPS_DEBUG
     h->debug.chars_processed++;
     h->debug.raw[h->debug.raw_idx & 0xFFU] = c;
@@ -431,8 +433,24 @@ void Gps_StoreByte(Gps_Handle_t *h)
         h->sentence[h->sentence_idx] = '\0';
         h->sentence_ready = true;
     }
+}
+
+void Gps_StoreByte(Gps_Handle_t *h)
+{
+    if (h == NULL) return;
+
+    Gps_StoreChar(h, (char)h->rx_byte);
 
     HAL_UART_Receive_IT(h->huart, &h->rx_byte, 1U);
+}
+
+void Gps_StoreBytes(Gps_Handle_t *h, const uint8_t *data, uint16_t len)
+{
+    if (h == NULL || data == NULL) return;
+
+    for (uint16_t i = 0U; i < len; i++) {
+        Gps_StoreChar(h, (char)data[i]);
+    }
 }
 
 GpsStatus_e Gps_SendMTK(Gps_Handle_t *h, const char *cmd)

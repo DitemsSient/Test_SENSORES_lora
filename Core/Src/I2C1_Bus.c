@@ -21,7 +21,11 @@ static osMutexId_t s_mutex = NULL;   /* NULL hasta I2C1Bus_InitMutex() */
 
 void I2C1Bus_InitMutex(void)
 {
-    s_mutex = osMutexNew(NULL);
+    /* osMutexPrioInherit: evita
+     * inversion de prioridad si LoraTask (AboveNormal) llega a esperar
+     * este mutex. */
+    static const osMutexAttr_t attr = { .attr_bits = osMutexPrioInherit };
+    s_mutex = osMutexNew(&attr);
 }
 
 void I2C1Bus_Lock(void)

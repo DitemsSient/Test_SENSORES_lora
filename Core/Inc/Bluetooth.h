@@ -41,9 +41,10 @@ extern "C" {
 #define BT_TX_BUFFER_SIZE       256U    /**< Max transmit payload bytes      */
 #define BT_RX_BUFFER_SIZE       256U    /**< Max receive payload bytes       */
 
-/* Advertise protocol */
+/* Advertise protocol — espera de ACKCON es indefinida (ver BluetoothTask en
+ * Tareas.c), no tiene timeout propio. */
 
-#define BT_ADVERTISE_TIMEOUT_MS 15000U  /**< Timeout waiting for $OK after $CON  */
+#define BT_ACKCONF_TIMEOUT_MS    1500U  /**< Timeout esperando ACKCONF tras mandar $CONF<datos> */
 
 /* ========================  ENUMERATIONS  ================================== */
 
@@ -57,6 +58,18 @@ typedef enum {
     BT_ERR_BUSY,                /**< Module busy                             */
     BT_ERR_OVERFLOW             /**< Buffer overflow                         */
 } BtStatus_e;
+
+/** @brief ACK pendiente del protocolo de juego ($...\r con Mira) — mismo
+ *         patron usado en el proyecto hermano (Mira): ACK_NINGUNO significa
+ *         "nada pendiente"; el resto son mensajes reales que BluetoothTask
+ *         espera despues de mandar el comando correspondiente. Agregar aqui
+ *         cada mensaje nuevo que necesite esperar su ACK. */
+typedef enum {
+    ACK_NINGUNO = 0,
+    ACK_CON,        /**< esperando "ACKCON", tras mandar $CON<mac>         */
+    ACK_RUN,        /**< esperando "ACKRUN", tras mandar $RUN (no implementado aun) */
+    ACK_CONF,       /**< esperando "ACKCONF", tras mandar $CONF<datos>     */
+} AckEstado_e;
 
 /* ============================  STRUCTURES  ================================ */
 
@@ -111,10 +124,12 @@ void Bt_ResetRx(Bt_Handle_t *h);
 /* ========================  ADVERTISE API  ================================ */
 
 /**
- * @brief  Sends "CON\r" to enter advertising mode and resets the rx buffer.
- * @param  h  Pointer to the Bluetooth handle.
+ * @brief  Manda "$CON<mac_ap>\r" — le dice al modulo a que MAC debe tratar
+ *         de conectarse — y resetea el rx buffer.
+ * @param  h       Pointer to the Bluetooth handle.
+ * @param  mac_ap  MAC del apuntador (Mira) a la que conectarse, como texto.
  */
-BtStatus_e Bt_SendAdvertise(Bt_Handle_t *h);
+BtStatus_e Bt_SendAdvertise(Bt_Handle_t *h, const char *mac_ap);
 
 /* ========================  SELF-TEST  ==================================== */
 

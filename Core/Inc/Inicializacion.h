@@ -32,6 +32,7 @@ extern "C" {
 #endif
 
 #include "stm32l4xx_hal.h"
+#include <stdbool.h>
 
 /* ========================  CONFIGURATION  ================================= */
 
@@ -60,7 +61,105 @@ extern "C" {
 // #define INIT_RS485_ENABLE               0U   /**< Comunicacion_RS485.h             */
 #define INIT_POWERMANAGER_ENABLE        0U   /**< PowerManager.h — pendiente, se prueba despues */
 
+/* ============================  STRUCTURES  ================================ */
+
+/** @brief Resultado (OK/FALLO) de cada paso de Inicializacion_Run(), uno por
+ *         modulo. Se va llenando conforme avanza el init; Diagnostico_Print()
+ *         lo imprime completo por el Logger cuando haga falta. */
+typedef struct {
+    bool i2c_completo;    /**< Todas las direcciones I2C esperadas respondieron */
+    bool motovibrador;
+    bool buzzer;
+    bool flash;
+    bool magnetometro;
+    bool imu;
+    bool batterymonitor;
+    bool sensorluz;
+    bool bluetooth;
+    bool lora;
+    bool rx_ir;           /**< Solo init — no hay forma de autoverificar sin transmisor externo */
+    bool rgb;
+    bool gps;
+} Diagnostico_t;
+
+extern Diagnostico_t Diagnostico;
+
+/** @brief Modo de operacion global de la tarjeta. Nace SIEMPRE en
+ *         MODO_CONFIGURACION (ver Inicializacion_Run()) — Sensores entra a
+ *         MODO_EJERCICIO solo al mandar/procesar $RUN (protocolo Bluetooth
+ *         con Mira, ver memoria de protocolo), y regresa a
+ *         MODO_CONFIGURACION con $END o $DSCON. Determina, entre otras
+ *         cosas, cual interrupcion (LoRa vs recepcion IR de disparos) tiene
+ *         mayor prioridad en el NVIC — ver Modo_SetOperacion(). */
+typedef enum {
+    MODO_CONFIGURACION = 0,   /**< Arranque, emparejamiento BLE, $*<datos>  */
+    MODO_EJERCICIO,            /**< Cuenta regresiva -> disparo habilitado  */
+} ModoOperacion_e;
+
+extern ModoOperacion_e g_modo_operacion;
+
+/** @brief Datos del ejercicio/jugador — payload que llega por LoRa
+ *         (numOrden,ID,equipo,alias,vidas,municion,tiempo,mac1,mac2, ver
+ *         CODIGO_LORA de referencia) y que luego se retransmite a Mira por
+ *         Bluetooth (protocolo $CONF<datos>, orden/lora/equipo/alias/
+ *         vidas/balas/tiempo/mac — mac1 es la que se manda ahi, mac2 no se
+ *         usa todavia). Mas los campos de sensores que llena SensorsTask
+ *         cada ciclo (ver Tareas.c). Nace completa en 0 — los valores
+ *         reales llegan por LoRa, ya no hay placeholders de arranque. */
+typedef struct {
+    uint8_t  orden;             /**< Orden/turno asignado por el servidor remoto */
+    uint8_t  lora;               /**< Identificador/canal LoRa del jugador       */
+    char     team_name[32];      /**< "equipo" en el CSV                         */
+    char     player_name[32];    /**< "alias" en el CSV                          */
+    uint8_t  lives;              /**< "vidas"                                    */
+    uint16_t ammo;                /**< "municion" — uint16_t, no uint8_t: el CSV de origen ya usa 16 bits */
+    uint32_t tiempo;             /**< Duracion del ejercicio, segundos           */
+    char     mac[18];            /**< "mac1" del CSV — la que se usa para Bluetooth */
+    char     mac2[18];           /**< "mac2" del CSV — reservada, sin uso por ahora */
+
+    uint8_t  lvBatery;
+
+    /* Sensores — llenados por SensorsTask */
+    float    lux;
+    float    mag_x_uT, mag_y_uT, mag_z_uT;
+    float    gyro_x_dps, gyro_y_dps, gyro_z_dps;
+} ExerciseGameData_t;
+
+extern ExerciseGameData_t g_exercise_data;
+
 /* ================================  API  =================================== */
+
+/**
+ * @brief  Imprime el Diagnostico_t completo por el Logger (OK/FALLO por
+ *         modulo). Se llama una vez al final de Inicializacion_Run(), pero
+ *         es publica para poder invocarla de nuevo donde haga falta.
+ */
+void Diagnostico_Print(void);
+
+/**
+ * @brief  Imprime los 8 campos de g_exercise_data que vienen del protocolo
+ *         ($*<datos>: orden, lora, equipo, alias, vidas, balas, tiempo,
+ *         mac). Se llama al procesar $*<datos> y donde se necesite
+ *         confirmar el estado actual del ejercicio.
+ */
+void Inicializacion_PrintExerciseData(void);
+
+/**
+ * @brief  Imprime las ultimas lecturas de sensores de g_exercise_data (luz,
+ *         bateria, magnetometro, giroscopio) — debug generico, llamado por
+ *         SensorsTask al final de cada ciclo (ver Tareas.c).
+ */
+void Inicializacion_PrintSensorsData(void);
+
+/**
+ * @brief  Aplica el modo de operacion: actualiza g_modo_operacion y
+ *         reacomoda las prioridades del NVIC entre la interrupcion de LoRa
+ *         y la de recepcion IR de disparos (ver comentario en el .c —
+ *         swap valido en runtime, siempre dentro del rango seguro para
+ *         FreeRTOS: configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY..15).
+ * @param  modo  Nuevo modo de operacion.
+ */
+void Modo_SetOperacion(ModoOperacion_e modo);
 
 /**
  * @brief  Corre toda la secuencia de inicializacion, en orden. Bootloader
@@ -85,8 +184,10 @@ void Inicializacion_PrintBanner(void);
  *         cual no.
  * @note   Bloqueante (~1-2 s). Requiere I2C1 ya inicializado (MX_I2C1_Init,
  *         siempre corre) y el Logger listo si se quiere ver el reporte.
+ * @retval true si TODAS las direcciones esperadas respondieron, false si
+ *         alguna falto.
  */
-void Search_Disp_I2C(void);
+bool Search_Disp_I2C(void);
 
 #ifdef __cplusplus
 }

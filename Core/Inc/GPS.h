@@ -251,6 +251,19 @@ GpsStatus_e Gps_Process(Gps_Handle_t *h);
  */
 void Gps_StoreByte(Gps_Handle_t *h);
 
+/**
+ * @brief  Accumulates un bloque completo de bytes (modo DMA) en el sentence
+ *         buffer, en una sola pasada.
+ * @param  h     Pointer to the GPS handle.
+ * @param  data  Buffer con los bytes recibidos (ej. del callback de
+ *               HAL_UARTEx_ReceiveToIdle_DMA).
+ * @param  len   Cuantos bytes hay en data.
+ * @note   A diferencia de Gps_StoreByte(), NO re-arma nada — en modo DMA
+ *         circular no hace falta, y en modo normal el caller decide cuando
+ *         volver a armar HAL_UARTEx_ReceiveToIdle_DMA().
+ */
+void Gps_StoreBytes(Gps_Handle_t *h, const uint8_t *data, uint16_t len);
+
 /* --- MTK command interface --- */
 
 /**

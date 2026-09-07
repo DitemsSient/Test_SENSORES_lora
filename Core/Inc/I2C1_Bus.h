@@ -33,7 +33,7 @@ extern "C" {
 /**
  * @brief  Crea el mutex del bus I2C1.
  * @note   Llamar UNA vez, despues de osKernelInitialize() y antes de
- *         osKernelStart() — igual que Log_InitMutex().
+ *         osKernelStart() — igual que Log_InitQueue() (ver Logger.h).
  */
 void I2C1Bus_InitMutex(void);
 
