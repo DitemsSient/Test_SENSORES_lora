@@ -50,6 +50,18 @@ extern "C" {
 #define LORA_JOIN_TIMEOUT_MS   15000U   /**< Timeout esperando "JOINED" tras AT+QJOIN=1 */
 #define LORA_CSV_FIELD_COUNT      9U    /**< numOrden,ID,equipo,alias,vidas,municion,tiempo,mac1,mac2 */
 
+/* El primer comando AT que se manda tras encender/despertar el modulo a
+ * veces no "pega" (el modulo todavia esta arrancando internamente) —
+ * confirmado con hardware real 2026-09-09: el mismo "ATQ" fallaba una vez
+ * y funcionaba a la tercera. El codigo de referencia del companero
+ * (CODIGO_LORA/lora_kg200z.c, setupLoRa()) tambien manda un "ATQ" de
+ * cortesia antes del que si se checa, por la misma razon. En vez de un
+ * solo intento "de cortesia", aqui se reintenta hasta LORA_ATQ_RETRIES
+ * veces cualquier comando que sea el primero tras una pausa larga (el ATQ
+ * de Lora_Setup() y el de Lora_Connect() antes del QJOIN). */
+#define LORA_ATQ_RETRIES           3U
+#define LORA_RESET_SETTLE_MS     500U   /**< Espera tras AT+QRFS (reset de fabrica) antes de reconfigurar */
+
 /* ========================  ENUMERATIONS  ================================== */
 
 /* Driver status / error codes */
@@ -189,9 +201,14 @@ LoraStatus_e Lora_WakeUp(Lora_Handle_t *h);
 LoraStatus_e Lora_Setup(Lora_Handle_t *h);
 
 /**
- * @brief  Hace join a la red LoRaWAN (equivalente a connectLoRa()).
+ * @brief  Hace join a la red LoRaWAN (equivalente a connectLoRa()). Si el
+ *         primer AT+QJOIN=1 no confirma ("MAC txDone"/"JOINED"), manda un
+ *         reset de fabrica (AT+QRFS), reconfigura con Lora_Setup() y
+ *         reintenta el join una vez mas antes de rendirse — mismo patron
+ *         que CODIGO_LORA/lora_kg200z.c (connectLoRa()) al fallar el join.
  * @param  h  Pointer to the LoRa handle.
- * @retval LORA_OK si el join se confirmo ("JOINED"), LORA_ERR_TIMEOUT si no.
+ * @retval LORA_OK si el join se confirmo ("JOINED"), LORA_ERR_TIMEOUT si no
+ *         (incluso despues del reset de fabrica).
  */
 LoraStatus_e Lora_Connect(Lora_Handle_t *h);
 

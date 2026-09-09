@@ -43,6 +43,27 @@ static bool Lora_SendAndWait(Lora_Handle_t *h, const char *cmd, const char *expe
 }
 
 /**
+ * @brief  Igual que Lora_SendAndWait(), pero reintenta hasta "retries"
+ *         veces si no llega "expect" — el primer comando tras una pausa
+ *         larga (modulo recien encendido/despertado) a veces no "pega" la
+ *         primera vez, confirmado con hardware real (ver comentario de
+ *         LORA_ATQ_RETRIES en Lora.h). Cada intento fallido espera
+ *         timeout_ms antes del siguiente, igual que el codigo de
+ *         referencia del companero (que manda un "ATQ" de cortesia antes
+ *         del que si cuenta).
+ */
+static bool Lora_SendAndWaitRetry(Lora_Handle_t *h, const char *cmd, const char *expect,
+                                   uint32_t timeout_ms, uint8_t retries)
+{
+    for (uint8_t i = 0U; i < retries; i++) {
+        if (Lora_SendAndWait(h, cmd, expect, timeout_ms)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * @brief  Espera "expect" en lo que ya se fue acumulando en rx_buffer, SIN
  *         mandar nada nuevo ni resetear — para respuestas asincronas que
  *         llegan despues de un comando ya mandado (ej. "JOINED" tras
@@ -274,7 +295,7 @@ LoraStatus_e Lora_Setup(Lora_Handle_t *h)
 {
     if (h == NULL) return LORA_ERR_PARAM;
 
-    if (!Lora_SendAndWait(h, "ATQ\r\n", "OK", LORA_CMD_TIMEOUT_MS)) {
+    if (!Lora_SendAndWaitRetry(h, "ATQ\r\n", "OK", LORA_CMD_TIMEOUT_MS, LORA_ATQ_RETRIES)) {
         Log_Print("LORA", "ERROR: modulo no responde a ATQ.");
         return LORA_ERR_UART;
     }
@@ -316,24 +337,65 @@ LoraStatus_e Lora_Setup(Lora_Handle_t *h)
     return LORA_OK;
 }
 
-LoraStatus_e Lora_Connect(Lora_Handle_t *h)
+/**
+ * @brief  Un solo intento de AT+QJOIN=1 + espera de "JOINED" — separado de
+ *         Lora_Connect() para poder reintentarlo despues de un reset de
+ *         fabrica sin duplicar el codigo (ver Lora_Connect()).
+ */
+static LoraStatus_e Lora_IntentarJoin(Lora_Handle_t *h)
 {
-    if (h == NULL) return LORA_ERR_PARAM;
-
     if (!Lora_SendAndWait(h, "AT+QJOIN=1\r\n", "MAC txDone", 2000U)) {
-        Log_Print("LORA", "ERROR: no se pudo iniciar el join (sin 'MAC txDone').");
         return LORA_ERR_TIMEOUT;
     }
 
     /* "JOINED" llega asincrono, cuando el gateway responde — no se manda
      * nada nuevo aqui, solo se sigue revisando lo acumulado. */
     if (!Lora_WaitFor(h, "JOINED", LORA_JOIN_TIMEOUT_MS)) {
-        Log_Print("LORA", "ERROR: timeout esperando JOINED del gateway.");
         return LORA_ERR_TIMEOUT;
     }
 
-    Log_Print("LORA", "Join confirmado (JOINED).");
     return LORA_OK;
+}
+
+LoraStatus_e Lora_Connect(Lora_Handle_t *h)
+{
+    if (h == NULL) return LORA_ERR_PARAM;
+
+    /* "ATQ" de cortesia antes del QJOIN — mismo motivo que en Lora_Setup():
+     * el primer comando tras una pausa larga a veces no pega. No es fatal
+     * si falla (el modulo puede seguir respondiendo al QJOIN igual), solo
+     * se reintenta unas veces sin abortar el connect por esto. */
+    Lora_SendAndWaitRetry(h, "ATQ\r\n", "OK", LORA_CMD_TIMEOUT_MS, LORA_ATQ_RETRIES);
+
+    if (Lora_IntentarJoin(h) == LORA_OK) {
+        Log_Print("LORA", "Join confirmado (JOINED).");
+        return LORA_OK;
+    }
+
+    /* Primer intento de join fallido — mismo caso que el codigo de
+     * referencia del companero (CODIGO_LORA/lora_kg200z.c, connectLoRa()):
+     * si no llega "MAC txDone" (o nunca llega "JOINED"), se asume que el
+     * modulo quedo en un estado raro y se le manda un reset de fabrica
+     * (AT+QRFS) antes de reintentar — a diferencia de la referencia (que
+     * solo reconfigura y se queda ahi, sin volver a pedir join), aqui SI
+     * se reintenta el join una vez mas despues del reset+reconfiguracion,
+     * para darle una oportunidad real de recuperarse sola. */
+    Log_Print("LORA", "Join fallo — reset de fabrica (AT+QRFS) y reintentando...");
+    Lora_Transmit(h, (const uint8_t *)"AT+QRFS\r\n", 9U);   /* no responde nada */
+    HAL_Delay(LORA_RESET_SETTLE_MS);
+
+    if (Lora_Setup(h) != LORA_OK) {
+        Log_Print("LORA", "ERROR: no se pudo reconfigurar tras el reset de fabrica.");
+        return LORA_ERR_TIMEOUT;
+    }
+
+    if (Lora_IntentarJoin(h) == LORA_OK) {
+        Log_Print("LORA", "Join confirmado (JOINED) tras reset de fabrica.");
+        return LORA_OK;
+    }
+
+    Log_Print("LORA", "ERROR: fallo el join incluso despues del reset de fabrica.");
+    return LORA_ERR_TIMEOUT;
 }
 
 /* ==========================  PARSEO DE DATOS  ============================== */
