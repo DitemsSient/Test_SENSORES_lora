@@ -33,13 +33,38 @@ static bool Lora_SendAndWait(Lora_Handle_t *h, const char *cmd, const char *expe
     Lora_Transmit(h, (const uint8_t *)cmd, (uint16_t)strlen(cmd));
 
     uint32_t start = HAL_GetTick();
+    bool     found = false;
     while ((HAL_GetTick() - start) < timeout_ms) {
         if (h->rx_count > 0U && strstr((char *)h->rx_buffer, expect) != NULL) {
-            return true;
+            found = true;
+            break;
         }
         HAL_Delay(20U);
     }
-    return false;
+
+    /* Imprime SIEMPRE lo que en verdad contesto el modulo, encontrara o no
+     * "expect" — util para depurar el init a ojo. No hace falta DMA para
+     * esto: la recepcion IT (Lora_StoreByte(), armada por Lora_Init())
+     * ya va llenando h->rx_buffer byte a byte, solo faltaba loguearlo. */
+    Log_Printf("LORA", "[INIT] %s -> %s", cmd,
+               (h->rx_count > 0U) ? (char *)h->rx_buffer : "(sin respuesta)");
+
+    return found;
+}
+
+/**
+ * @brief  Manda "ATQ\r\n" sin esperar ni revisar la respuesta — "cortesia"
+ *         para despertar/sincronizar el modulo antes del primer comando
+ *         que si se checa, igual que hace el codigo de referencia del
+ *         companero (CODIGO_LORA/lora_kg200z.c, setupLoRa(): un ATQ de
+ *         cortesia + HAL_Delay(200) antes del ATQ real). Llamarla un par
+ *         de veces seguidas cuando el modulo recien se encendio/desperto.
+ */
+static void Lora_SendATQDefault(Lora_Handle_t *h)
+{
+    Lora_ResetRx(h);
+    Lora_Transmit(h, (const uint8_t *)"ATQ\r\n", 5U);
+    HAL_Delay(200U);
 }
 
 /**
@@ -295,6 +320,10 @@ LoraStatus_e Lora_Setup(Lora_Handle_t *h)
 {
     if (h == NULL) return LORA_ERR_PARAM;
 
+    /* 2 ATQ de cortesia antes del real — ver Lora_SendATQDefault(). */
+    Lora_SendATQDefault(h);
+    Lora_SendATQDefault(h);
+
     if (!Lora_SendAndWaitRetry(h, "ATQ\r\n", "OK", LORA_CMD_TIMEOUT_MS, LORA_ATQ_RETRIES)) {
         Log_Print("LORA", "ERROR: modulo no responde a ATQ.");
         return LORA_ERR_UART;
@@ -365,6 +394,8 @@ LoraStatus_e Lora_Connect(Lora_Handle_t *h)
      * el primer comando tras una pausa larga a veces no pega. No es fatal
      * si falla (el modulo puede seguir respondiendo al QJOIN igual), solo
      * se reintenta unas veces sin abortar el connect por esto. */
+    Lora_SendATQDefault(h);
+    Lora_SendATQDefault(h);
     Lora_SendAndWaitRetry(h, "ATQ\r\n", "OK", LORA_CMD_TIMEOUT_MS, LORA_ATQ_RETRIES);
 
     if (Lora_IntentarJoin(h) == LORA_OK) {
