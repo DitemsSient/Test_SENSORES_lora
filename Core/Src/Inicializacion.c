@@ -107,7 +107,7 @@
  * fallarian siempre (no hay con quien hacer join). En 1U se simula que
  * salio todo bien (Diagnostico.lora=true) sin tocar el modulo real; poner
  * en 0U en cuanto haya gateway para probar la configuracion de verdad. */
-#define LORA_SIMULAR_SIN_GATEWAY     1U
+#define LORA_SIMULAR_SIN_GATEWAY     0U
 
 #if INIT_RGB_ENABLE
 /* Par1 del mapeo fisico confirmado de esta tarjeta: D1=verde, D2=rojo, D7=azul. */
