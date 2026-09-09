@@ -163,6 +163,10 @@ void Log_Task(void *argument)
     LogEntry_t entry;
     for (;;) {
         if (osMessageQueueGet(s_queue, &entry, NULL, osWaitForever) == osOK) {
+            /* Salto de linea ANTES de cada entrada — separa visualmente
+             * cada log en la terminal (sin esto salen todos pegados y es
+             * dificil de leer durante debug). */
+            Log_TransmitUSB((uint8_t *)"\r\n", 2U);
             Log_TransmitUSB((uint8_t *)entry.line, entry.len);
         }
     }

@@ -13,10 +13,61 @@
 #include "Lora.h"
 #include "Logger.h"
 #include <string.h>
+#include <stdlib.h>
 
 /* ========================  EXTERNAL HAL HANDLES  ========================== */
 
 extern UART_HandleTypeDef huart2;
+
+/* ======================  STATIC FUNCTIONS  ================================ */
+
+/**
+ * @brief  Manda un comando y espera "expect" en la respuesta, dentro de
+ *         timeout_ms. Resetea el rx antes de mandar. Bloqueante (HAL_Delay
+ *         en pedacitos de 20ms) — solo se usa desde Inicializacion_Run(),
+ *         antes del RTOS.
+ */
+static bool Lora_SendAndWait(Lora_Handle_t *h, const char *cmd, const char *expect, uint32_t timeout_ms)
+{
+    Lora_ResetRx(h);
+    Lora_Transmit(h, (const uint8_t *)cmd, (uint16_t)strlen(cmd));
+
+    uint32_t start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < timeout_ms) {
+        if (h->rx_count > 0U && strstr((char *)h->rx_buffer, expect) != NULL) {
+            return true;
+        }
+        HAL_Delay(20U);
+    }
+    return false;
+}
+
+/**
+ * @brief  Espera "expect" en lo que ya se fue acumulando en rx_buffer, SIN
+ *         mandar nada nuevo ni resetear — para respuestas asincronas que
+ *         llegan despues de un comando ya mandado (ej. "JOINED" tras
+ *         AT+QJOIN=1, que primero contesta "MAC txDone" de inmediato y
+ *         luego "JOINED" cuando el gateway responde).
+ */
+static bool Lora_WaitFor(Lora_Handle_t *h, const char *expect, uint32_t timeout_ms)
+{
+    uint32_t start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < timeout_ms) {
+        if (h->rx_count > 0U && strstr((char *)h->rx_buffer, expect) != NULL) {
+            return true;
+        }
+        HAL_Delay(20U);
+    }
+    return false;
+}
+
+static uint8_t Lora_HexCharToVal(char c)
+{
+    if (c >= '0' && c <= '9') return (uint8_t)(c - '0');
+    if (c >= 'A' && c <= 'F') return (uint8_t)(c - 'A' + 10);
+    if (c >= 'a' && c <= 'f') return (uint8_t)(c - 'a' + 10);
+    return 0U;
+}
 
 /* ========================  PUBLIC FUNCTIONS  =============================== */
 
@@ -92,9 +143,88 @@ void Lora_ResetRx(Lora_Handle_t *h)
         return;
     }
 
-    h->rx_count = 0U;
-    h->rx_ready = false;
+    h->rx_count        = 0U;
+    h->rx_ready        = false;
+    h->star_raw_streak = 0U;
+    h->star_hex_streak = 0U;
     memset(h->rx_buffer, 0, LORA_RX_BUFFER_SIZE);
+}
+
+void Lora_StoreBytes(Lora_Handle_t *h, const uint8_t *data, uint16_t len)
+{
+    if (h == NULL || data == NULL) return;
+
+    for (uint16_t i = 0U; i < len; i++) {
+        char c = (char)data[i];
+
+        if (c == '$') {
+            /* $ crudo — caso en que alguien arma el frame a mano, sin pasar
+             * todo por hex (ej. pruebas directas por terminal). */
+            h->rx_count        = 0U;
+            h->rx_ready        = false;
+            h->rx_buffer[0]    = '\0';
+            h->star_raw_streak = 0U;
+            h->star_hex_streak = 0U;
+            continue;
+        }
+        if (c == '*') {
+            /* * crudo — cuenta la racha, cierra al tercero seguido (ver
+             * comentario de "por que triple" en Lora.h). */
+            h->star_raw_streak++;
+            if ((h->star_raw_streak >= 3U) && (h->rx_count > 0U)) {
+                h->rx_ready = true;
+            }
+            continue;
+        }
+        h->star_raw_streak = 0U;   /* cualquier otro byte rompe la racha de '*' crudos */
+
+        if (h->rx_count < (LORA_RX_BUFFER_SIZE - 1U)) {
+            h->rx_buffer[h->rx_count] = (uint8_t)c;
+            h->rx_count++;
+            h->rx_buffer[h->rx_count] = '\0';
+        }
+
+        /* ChirpStack manda TODO codificado en hex, incluyendo el $ y el *
+         * propios del mensaje — nunca llegan como bytes crudos en ese caso,
+         * llegan como los caracteres de texto "24" y "2A". Por eso ademas
+         * revisamos: cada vez que se completa un PAR alineado de caracteres
+         * hex (posiciones 0-1, 2-3, 4-5..., nunca a la mitad de un par —
+         * si no, un "2A" que cae a caballo entre dos bytes distintos daria
+         * un cierre falso), si ese par es "2A"/"2a" cuenta para la racha;
+         * al tercer par seguido se cierra el frame Y se recortan esos 6
+         * caracteres del buffer, para que el "***" codificado no quede
+         * pegado al ultimo campo real al decodificar. No hace falta buscar
+         * el "24" de apertura — el contenido decodificado se busca con
+         * strstr("CONF", ...) en LoraTask, que encuentra la palabra este
+         * donde este. */
+        if ((h->rx_count >= 2U) && ((h->rx_count % 2U) == 0U)) {
+            char par_hi = (char)h->rx_buffer[h->rx_count - 2U];
+            char par_lo = (char)h->rx_buffer[h->rx_count - 1U];
+            if (par_hi == '2' && (par_lo == 'A' || par_lo == 'a')) {
+                h->star_hex_streak++;
+                if (h->star_hex_streak >= 3U) {
+                    h->rx_count      -= 6U;   /* quita los 3 pares "2A" del cierre */
+                    h->rx_buffer[h->rx_count] = '\0';
+                    h->rx_ready = true;
+                }
+            } else {
+                h->star_hex_streak = 0U;
+            }
+        }
+    }
+}
+
+void Lora_EncodeToHex(const uint8_t *data, size_t data_len, char *out)
+{
+    static const char hex_chars[] = "0123456789ABCDEF";
+
+    if (data == NULL || out == NULL) return;
+
+    for (size_t i = 0U; i < data_len; i++) {
+        out[i * 2U]      = hex_chars[(data[i] >> 4U) & 0x0FU];
+        out[i * 2U + 1U] = hex_chars[data[i] & 0x0FU];
+    }
+    out[data_len * 2U] = '\0';
 }
 
 /* ========================  LOW POWER  ====================================== */
@@ -136,4 +266,147 @@ LoraStatus_e Lora_WakeUp(Lora_Handle_t *h)
 
     HAL_Delay(LORA_WAKE_DELAY_MS);
     return LORA_OK;
+}
+
+/* ==================  CONFIGURACION CON EL GATEWAY (KG200Z)  =============== */
+
+LoraStatus_e Lora_Setup(Lora_Handle_t *h)
+{
+    if (h == NULL) return LORA_ERR_PARAM;
+
+    if (!Lora_SendAndWait(h, "ATQ\r\n", "OK", LORA_CMD_TIMEOUT_MS)) {
+        Log_Print("LORA", "ERROR: modulo no responde a ATQ.");
+        return LORA_ERR_UART;
+    }
+
+    Lora_SendAndWait(h, "AT+QVL=0\r\n", "OK", LORA_CMD_TIMEOUT_MS);   /* log level, no critico */
+
+    /* Region US915 / subbanda 2 (canales 8-15) / clase A / ADR / low-power
+     * — mismos valores que CODIGO_LORA/lora_kg200z.c. Solo se cambia lo que
+     * no esta ya en el valor esperado (AT+QBAND=8 reinicia el modulo solo). */
+    bool cambios = false;
+
+    if (!Lora_SendAndWait(h, "AT+QBAND=?\r\n", "QBAND:8", LORA_CMD_TIMEOUT_MS)) {
+        cambios = Lora_SendAndWait(h, "AT+QBAND=8\r\n", "OK", LORA_CMD_TIMEOUT_MS) || cambios;
+        HAL_Delay(100U);
+    }
+    if (!Lora_SendAndWait(h, "AT+QCHAN=?\r\n", "FF00:0000:0000:0000:0000:0000", LORA_CMD_TIMEOUT_MS)) {
+        cambios = Lora_SendAndWait(h, "AT+QCHAN=FF00:0000:0000:0000:0000:0000\r\n", "OK", LORA_CMD_TIMEOUT_MS) || cambios;
+    }
+    if (!Lora_SendAndWait(h, "AT+QCLASS=?\r\n", "QCLASS: A", LORA_CMD_TIMEOUT_MS)) {
+        cambios = Lora_SendAndWait(h, "AT+QCLASS=A\r\n", "OK", LORA_CMD_TIMEOUT_MS) || cambios;
+    }
+    if (!Lora_SendAndWait(h, "AT+QADR=?\r\n", "QADR:1", LORA_CMD_TIMEOUT_MS)) {
+        cambios = Lora_SendAndWait(h, "AT+QADR=1\r\n", "OK", LORA_CMD_TIMEOUT_MS) || cambios;
+    }
+    if (!Lora_SendAndWait(h, "AT+QLPMOD=?\r\n", "Lowpower mode is enabled!", LORA_CMD_TIMEOUT_MS)) {
+        cambios = Lora_SendAndWait(h, "AT+QLPMOD=1\r\n", "OK", LORA_CMD_TIMEOUT_MS) || cambios;
+    }
+
+    if (cambios) {
+        Lora_SendAndWait(h, "AT+QCS\r\n", "OK", 500U);      /* guarda config */
+        Lora_Transmit(h, (const uint8_t *)"ATZQ\r\n", 6U);  /* reset — no hay respuesta */
+        HAL_Delay(250U);
+        Lora_SendAndWait(h, "AT+QVL=0\r\n", "OK", LORA_CMD_TIMEOUT_MS);
+        Log_Print("LORA", "Configuracion aplicada y modulo reseteado.");
+    } else {
+        Log_Print("LORA", "Ya estaba configurado, sin cambios.");
+    }
+
+    return LORA_OK;
+}
+
+LoraStatus_e Lora_Connect(Lora_Handle_t *h)
+{
+    if (h == NULL) return LORA_ERR_PARAM;
+
+    if (!Lora_SendAndWait(h, "AT+QJOIN=1\r\n", "MAC txDone", 2000U)) {
+        Log_Print("LORA", "ERROR: no se pudo iniciar el join (sin 'MAC txDone').");
+        return LORA_ERR_TIMEOUT;
+    }
+
+    /* "JOINED" llega asincrono, cuando el gateway responde — no se manda
+     * nada nuevo aqui, solo se sigue revisando lo acumulado. */
+    if (!Lora_WaitFor(h, "JOINED", LORA_JOIN_TIMEOUT_MS)) {
+        Log_Print("LORA", "ERROR: timeout esperando JOINED del gateway.");
+        return LORA_ERR_TIMEOUT;
+    }
+
+    Log_Print("LORA", "Join confirmado (JOINED).");
+    return LORA_OK;
+}
+
+/* ==========================  PARSEO DE DATOS  ============================== */
+
+size_t Lora_DecodeHexToBytes(const char *hex_str, uint8_t *out, size_t max_len)
+{
+    if (hex_str == NULL || out == NULL) return 0U;
+
+    size_t len     = strlen(hex_str);
+    size_t out_len = 0U;
+
+    for (size_t i = 0U; (i + 1U) < len && out_len < max_len; i += 2U) {
+        uint8_t hi = Lora_HexCharToVal(hex_str[i]);
+        uint8_t lo = Lora_HexCharToVal(hex_str[i + 1U]);
+        out[out_len++] = (uint8_t)((hi << 4U) | lo);
+    }
+    return out_len;
+}
+
+bool Lora_ParseDatos(const char *csv_ascii, ExerciseGameData_t *out)
+{
+    if (csv_ascii == NULL || out == NULL) return false;
+
+    char datos[300];
+    strncpy(datos, csv_ascii, sizeof(datos) - 1U);
+    datos[sizeof(datos) - 1U] = '\0';
+
+    size_t len   = strlen(datos);
+    size_t start = 0U;
+    if (len > 0U && datos[0] == '{') { start = 1U; }
+    if (len > 0U && datos[len - 1U] == '}') { datos[len - 1U] = '\0'; len--; }
+
+    char *contenido = datos + start;
+    len = strlen(contenido);
+
+    char   *campos[LORA_CSV_FIELD_COUNT];
+    uint8_t idx        = 0U;
+    size_t  campo_start = 0U;
+
+    for (size_t i = 0U; i <= len && idx < LORA_CSV_FIELD_COUNT; i++) {
+        if (i == len || contenido[i] == ',') {
+            contenido[i] = '\0';
+            campos[idx++] = &contenido[campo_start];
+            campo_start = i + 1U;
+        }
+    }
+
+    if (idx < LORA_CSV_FIELD_COUNT) {
+        Log_Print("LORA", "ERROR: se esperaban 9 campos separados por comas.");
+        return false;
+    }
+
+    out->orden = (uint8_t)atoi(campos[0]);
+    out->lora  = (uint8_t)atoi(campos[1]);
+    strncpy(out->team_name,   campos[2], sizeof(out->team_name) - 1U);
+    out->team_name[sizeof(out->team_name) - 1U] = '\0';
+    strncpy(out->player_name, campos[3], sizeof(out->player_name) - 1U);
+    out->player_name[sizeof(out->player_name) - 1U] = '\0';
+    out->lives  = (uint8_t)atoi(campos[4]);
+    out->ammo   = (uint16_t)atoi(campos[5]);
+    out->tiempo = (uint32_t)atoi(campos[6]);
+    strncpy(out->mac, campos[7], sizeof(out->mac) - 1U);
+    out->mac[sizeof(out->mac) - 1U] = '\0';
+    strncpy(out->mac2, campos[8], sizeof(out->mac2) - 1U);
+    out->mac2[sizeof(out->mac2) - 1U] = '\0';
+
+    return true;
+}
+
+bool Lora_ParseHexDatos(const char *hex_str, ExerciseGameData_t *out)
+{
+    uint8_t decoded[300];
+    size_t  n = Lora_DecodeHexToBytes(hex_str, decoded, sizeof(decoded) - 1U);
+    decoded[n] = '\0';
+    return Lora_ParseDatos((const char *)decoded, out);
 }

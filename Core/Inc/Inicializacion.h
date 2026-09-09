@@ -98,26 +98,60 @@ typedef enum {
 
 extern ModoOperacion_e g_modo_operacion;
 
-/** @brief Datos del ejercicio/jugador — payload que llega por LoRa
- *         (numOrden,ID,equipo,alias,vidas,municion,tiempo,mac1,mac2, ver
- *         CODIGO_LORA de referencia) y que luego se retransmite a Mira por
- *         Bluetooth (protocolo $CONF<datos>, orden/lora/equipo/alias/
- *         vidas/balas/tiempo/mac — mac1 es la que se manda ahi, mac2 no se
- *         usa todavia). Mas los campos de sensores que llena SensorsTask
- *         cada ciclo (ver Tareas.c). Nace completa en 0 — los valores
- *         reales llegan por LoRa, ya no hay placeholders de arranque. */
+/** @brief Datos del ejercicio/jugador — el "pizarron" compartido de todo el
+ *         sistema, todo se escribe aqui:
+ *         - Payload de config que llega por LoRa ($CONF<datos>, 9 campos:
+ *           numOrden,ID,equipo,alias,vidas,municion,tiempo,mac1,mac2 — ver
+ *           CODIGO_LORA de referencia) y que se retransmite a Mira por
+ *           Bluetooth (mismo protocolo $CONF<datos>, 8 campos: solo mac1,
+ *           mac2 no se manda).
+ *         - Telemetria de vuelta al gateway por LoRa (12 campos:
+ *           ID,numOrden,vidas,municion,bateria,latitud,longitud,altitud,
+ *           orientacion,pasos,ack,timestamp — latitud ANTES que longitud,
+ *           asi lo manda de verdad generarCadena() del codigo de
+ *           referencia del companero (CODIGO_LORA/lora_kg200z.c), aunque
+ *           su propio comentario diga lo contrario. Reusa los mismos
+ *           orden/lora/lives/ammo/bateria_ch de arriba, ver campos nuevos
+ *           abajo). El "ack" de esta telemetria es lo que confirma al
+ *           gateway que el $CONF se recibio bien (1) o no (0) — no es un
+ *           mensaje aparte, es este mismo frame con ack=1.
+ *         - $A_AP<balas>,<pct_bateria>\r que manda Mira por Bluetooth cada
+ *           200ms (solo si cambio algo) — actualiza ammo y bateria_ap.
+ *         - Lecturas de sensores que llena SensorsTask cada ciclo.
+ *         Nace en 0 salvo los placeholders de arranque (team_name,
+ *         player_name, bateria_ch — ver Inicializacion.c) hasta que $CONF
+ *         los sobreescriba. */
 typedef struct {
     uint8_t  orden;             /**< Orden/turno asignado por el servidor remoto */
     uint8_t  lora;               /**< Identificador/canal LoRa del jugador       */
     char     team_name[32];      /**< "equipo" en el CSV                         */
     char     player_name[32];    /**< "alias" en el CSV                          */
-    uint8_t  lives;              /**< "vidas"                                    */
-    uint16_t ammo;                /**< "municion" — uint16_t, no uint8_t: el CSV de origen ya usa 16 bits */
+    uint8_t  lives;              /**< "vidas" — solo nosotros la modificamos (impactos), Mira no la manda */
+    uint16_t ammo;                /**< "municion"/"balas" — CONF inicial, y luego actualizada por $A_AP de Mira */
     uint32_t tiempo;             /**< Duracion del ejercicio, segundos           */
     char     mac[18];            /**< "mac1" del CSV — la que se usa para Bluetooth */
     char     mac2[18];           /**< "mac2" del CSV — reservada, sin uso por ahora */
 
-    uint8_t  lvBatery;
+    /* Dos baterias distintas — no son lo mismo. bateria_ch (chaleco = esta
+     * tarjeta, Sensores) es la unica que se manda en la telemetria por
+     * ahora; bateria_ap (apuntador = Mira, viene de $A_AP) se guarda pero
+     * NO se agrega todavia al envio por LoRa — pendiente hasta que se
+     * actualice la base de datos del otro lado para tener este campo. */
+    uint8_t  bateria_ch;         /**< Bateria de ESTA tarjeta (chaleco) — la llena SensorsTask, es la que se manda por LoRa */
+    uint8_t  bateria_ap;         /**< Bateria de la Mira (apuntador) — la llena BluetoothTask via $A_AP, TODO: agregar al envio de telemetria */
+
+    /* Telemetria de vuelta al gateway por LoRa (los que faltaban de la
+     * lista de arriba) — en 0 hasta que GPS/IMU los vayan llenando.
+     * "orientacion" y "pasos" salen del IMU/magnetometro de esta tarjeta
+     * (todavia no se calculan, solo el campo esta listo); "longitud"/
+     * "latitud"/"altitud" salen de GpsTask cuando haya fix. */
+    float    longitud;
+    float    latitud;
+    float    altitud;
+    uint16_t orientacion;
+    uint16_t pasos;
+    uint8_t  ack;                /**< 1 si Mira confirmo el $CONF con $ACKCONF, 0 si no */
+    uint32_t timestamp;
 
     /* Sensores — llenados por SensorsTask */
     float    lux;

@@ -67,8 +67,9 @@ typedef enum {
 typedef enum {
     ACK_NINGUNO = 0,
     ACK_CON,        /**< esperando "ACKCON", tras mandar $CON<mac>         */
-    ACK_RUN,        /**< esperando "ACKRUN", tras mandar $RUN (no implementado aun) */
+    ACK_RUN,        /**< esperando "ACKRUN", tras mandar $RUN — ver BT_HandleRun() en Tareas.c */
     ACK_CONF,       /**< esperando "ACKCONF", tras mandar $CONF<datos>     */
+    ACK_END_S,      /**< esperando "ACKEND_S", tras mandar $END_S (fin de ejercicio, ver BT_HandleEndS() en Tareas.c) */
 } AckEstado_e;
 
 /* ============================  STRUCTURES  ================================ */

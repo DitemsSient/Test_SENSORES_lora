@@ -18,33 +18,36 @@
 #include "MMC5983MA.h"
 #include "BatteryMonitor.h"
 #include "Receptor_Infrarrojo_EXTI.h"
-#include "Driver_RGB.h"
+#include "Secuencia_Leds.h"
 #include "Bluetooth.h"
+#include "Lora.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* ======================  EXTERNAL HAL HANDLES  ============================ */
 
 extern UART_HandleTypeDef huart1;   /* GPS_UART = &huart1, ver GPS.h */
+extern UART_HandleTypeDef huart2;   /* LORA_UART = &huart2, ver Lora.h */
 extern I2C_HandleTypeDef  hi2c1;    /* I2C1 — bus compartido, protegido por mutex */
 
-/* Handle IR y canales RGB — definidos en Inicializacion.c, NO estaticos
- * ahi para poder referenciarlos aqui (ver comentarios en Inicializacion.c). */
+/* Handle IR — definido en Inicializacion.c, NO estatico ahi para poder
+ * referenciarlo aqui (ver comentarios en Inicializacion.c). Los canales
+ * RGB ya no se tocan directo aqui — ver Secuencia_Leds.h. */
 extern Ir_Handle_t ir_handle;
-extern LP55231_t   rgb;
-extern const uint8_t rgb_red_ch[3];
-extern const uint8_t rgb_green_ch[3];
-extern const uint8_t rgb_blue_ch[3];
 
 /* ======================  CONFIGURATION  ==================================== */
 
 #define GPS_DMA_BUF_SIZE     256U
-#define GPS_HEARTBEAT_MS    8000U
-#define SENSORS_PERIOD_MS  12000U
+#define GPS_HEARTBEAT_MS   20000U
+#define SENSORS_PERIOD_MS  25000U
 #define CALIB_PERIOD_MS      300U
 #define CALIB_RAW_MIN         16U    /**< raw_count > esto para considerar el buffer valido (ver Test_IR: tramas reales de 2 bytes dan 17-19 deltas) */
 #define CALIB_VALID_WORD  0xAA55U
-#define CALIB_BLINK_MS       500U
+
+#define LORA_DMA_BUF_SIZE    256U
+#define LORA_STALE_TIMEOUT_MS  5000U   /**< Si algo lleva abierto (sin '***'/"2A2A2A") mas de esto, se descarta solo */
+#define LORA_EXERCISE_PERIOD_MS 10000U /**< Cada cuanto se manda telemetria completa en MODO_EJERCICIO */
 
 /* ======================  STATIC VARIABLES  ================================ */
 
@@ -83,6 +86,49 @@ static const osThreadAttr_t bluetoothTask_attributes = {
     .priority   = (osPriority_t)osPriorityNormal,
 };
 
+static osThreadId_t loraTaskHandle;
+static const osThreadAttr_t loraTask_attributes = {
+    .name       = "LoraTask",
+    .stack_size = 1024U * 4U,   /* 4KB — parseo de CSV + hex encode/decode usan buffers locales */
+    .priority   = (osPriority_t)osPriorityNormal,
+};
+
+/* Buffer circular del DMA y handle de LoRa propios de esta tarea. */
+static uint8_t        s_lora_dma_buf[LORA_DMA_BUF_SIZE];
+static uint16_t       s_lora_dma_last_pos = 0U;
+static Lora_Handle_t  s_lora_task;
+
+/* NO estaticos — HAL_UART_ErrorCallback (Inicializacion.c) los revisa para
+ * saber si ya debe dejar de re-armar HAL_UART_Receive_IT(): mientras estas
+ * banderas esten en false (bring-up, antes del RTOS) SI hace falta
+ * re-armar IT en cada error; en cuanto GpsTask/LoraTask arman su DMA
+ * circular, re-armar IT encima del DMA lo rompe en silencio (bug real, ver
+ * comentario en Inicializacion.c). */
+bool g_gps_dma_activo  = false;
+bool g_lora_dma_activo = false;
+
+/* Bandera que le avisa a BluetoothTask que ya llego y se guardo un $CONF
+ * por LoRa — reemplaza el delay fijo de [PRUEBA]. Bandera que LoraTask
+ * revisa para saber cuando debe mandar la telemetria de vuelta (se marca
+ * al llegar ACKCONF en BluetoothTask). Mismo patron volatile que
+ * s_ack_pendiente/s_bt_conectado — un solo escritor, un solo lector cada
+ * una, sin necesidad de mutex. */
+static volatile bool s_lora_conf_listo       = false;
+static volatile bool s_lora_enviar_telemetria = false;
+
+/* Bandera que LoraTask marca al recibir $RUN por LoRa — BluetoothTask (que
+ * para entonces ya esta en su loop de escucha, tras el ACKCONF) la revisa
+ * para mandarle $RUN\r a la Mira y esperar ACKRUN antes de entrar de verdad
+ * a MODO_EJERCICIO (ver BT_HandleRun()). Mismo patron volatile de un solo
+ * escritor/un solo lector que s_lora_conf_listo. */
+static volatile bool s_lora_run_recibido = false;
+
+/* Mismo patron que s_lora_run_recibido, pero para $END_S — LoraTask la
+ * marca al recibirlo, BluetoothTask (loop de escucha) le manda $END_S\r a
+ * la Mira y espera ACKEND_S antes de dar por terminado el ejercicio, ver
+ * BT_HandleEndS(). */
+static volatile bool s_lora_end_s_recibido = false;
+
 /* Handle de Bluetooth propio de esta tarea — separado del que usa el
  * smoke test de Inicializacion.c, mismo patron que GPS/Sensores. NO
  * estatico — el HAL_UART_RxCpltCallback compartido (Inicializacion.c) lo
@@ -99,9 +145,9 @@ static volatile AckEstado_e s_ack_pendiente = ACK_NINGUNO;
 static volatile bool        s_bt_conectado  = false;
 
 #define BT_BLINK_MS          500U    /**< Parpadeo azul mientras se espera ACKCON            */
-#define BT_SIM_LORA_MS      5000U    /**< [PRUEBA] Cuanto "simulamos" la espera de LoRa (sin parpadeo, ya lo hace el verde de fin de Inicializacion_Run()) */
-#define BT_DSCON_BLINK_MS   600U     /**< Parpadeo rojo al recibir DSCON                     */
-#define BT_DSCON_BLINK_COUNT  5U     /**< Veces que parpadea rojo al recibir DSCON           */
+/* Parpadeo cian de DSCON / rojo de "respuesta inesperada" — ver
+ * LEDS_BT_DSCON_MS, LEDS_BT_DSCON_COUNT, LEDS_BT_ERROR_MS y
+ * LEDS_BT_ERROR_COUNT en Secuencia_Leds.h */
 
 /* Buffer circular del DMA y handle de GPS propios de esta tarea — separados
  * del handle que usa el smoke test de Inicializacion.c (ese ya cumplio su
@@ -135,7 +181,8 @@ static void GpsTask(void *argument)
      * osKernelStart(). */
     Log_Printf("RTOS", "Heap libre tras crear tareas: %u bytes (de %u)",
                (unsigned)xPortGetFreeHeapSize(), (unsigned)configTOTAL_HEAP_SIZE);
-    Log_Printf("RTOS", "Handles: sensors=%s calib=%s logger=%s bt=%s",
+    Log_Printf("RTOS", "Handles: lora=%s sensors=%s calib=%s logger=%s bt=%s",
+               (loraTaskHandle       != NULL) ? "OK" : "NULL",
                (sensorsTaskHandle    != NULL) ? "OK" : "NULL",
                (calibrateTaskHandle  != NULL) ? "OK" : "NULL",
                (loggerTaskHandle     != NULL) ? "OK" : "NULL",
@@ -152,6 +199,7 @@ static void GpsTask(void *argument)
     s_gps_dma_last_pos = 0U;
 
     HAL_UARTEx_ReceiveToIdle_DMA(GPS_UART, s_gps_dma_buf, GPS_DMA_BUF_SIZE);
+    g_gps_dma_activo = true;   /* HAL_UART_ErrorCallback ya no debe re-armar IT */
     Log_Print("GPS", "GpsTask arrancada (DMA circular + linea IDLE).");
 
     uint32_t sentence_count    = 0U;
@@ -161,26 +209,247 @@ static void GpsTask(void *argument)
         if (s_gps_task.sentence_ready) {
             if (Gps_Process(&s_gps_task) == GPS_OK) {
                 sentence_count++;
-                if (s_gps_task.data.position_valid) {
-                    Log_Printf("GPS", "FIX sats=%u lat=%s alt=%.1fm",
-                               s_gps_task.data.satellites,
-                               s_gps_task.data.position_str,
-                               s_gps_task.data.altitude);
-                }
+                /* Detalle de FIX comentado a proposito mientras se depura
+                 * BLE+LoRa — ver nota del heartbeat de abajo. */
+                // if (s_gps_task.data.position_valid) {
+                //     Log_Printf("GPS", "FIX sats=%u lat=%s alt=%.1fm",
+                //                s_gps_task.data.satellites,
+                //                s_gps_task.data.position_str,
+                //                s_gps_task.data.altitude);
+                // }
             }
         }
 
         /* Reporte de "sigo viva" cada 5s, con o sin fix — sin esto, si nunca
          * hay fix (antena mala, interiores, etc.) no hay forma de distinguir
-         * "la tarea esta corriendo pero sin fix" de "la tarea se murio". */
+         * "la tarea esta corriendo pero sin fix" de "la tarea se murio".
+         * Detalle (tramas/sats/fix) comentado a proposito mientras se
+         * depura BLE+LoRa — ensuciaba mucho el logger. Solo se deja esta
+         * linea corta para confirmar que la tarea si esta viva. */
         if ((HAL_GetTick() - last_status_tick) >= GPS_HEARTBEAT_MS) {
             last_status_tick = HAL_GetTick();
-            Log_Printf("GPS", "GpsTask viva: %lu tramas procesadas, sats=%u, fix=%s",
-                       (unsigned long)sentence_count, s_gps_task.data.satellites,
-                       s_gps_task.data.position_valid ? "SI" : "NO");
+            // Log_Printf("GPS", "GpsTask viva: %lu tramas procesadas, sats=%u, fix=%s",
+            //            (unsigned long)sentence_count, s_gps_task.data.satellites,
+            //            s_gps_task.data.position_valid ? "SI" : "NO");
+            Log_Print("GPS", "TASKGPS");
         }
 
         osDelay(200U);
+    }
+}
+
+/**
+ * @brief  Decodifica y despacha una linea ya cerrada (***) recibida por
+ *         LoRa: CONF/RUN/END_S/END, mismo criterio que antes (decodificar
+ *         TODO primero, nunca adivinar si es hex o texto plano). Funcion
+ *         propia (no solo inline en el loop de LoraTask) porque
+ *         Lora_EnviarTelemetria() ya no espera nada tras transmitir, asi
+ *         que el unico lugar que la llama por ahora es el loop principal —
+ *         se deja separada de todos modos por si en el futuro hace falta
+ *         reusarla en otro punto de recepcion.
+ * @param  line      Buffer NUL-terminado con la linea cruda (hex ASCII).
+ * @param  line_len  Bytes en line, solo para el log de depuracion.
+ */
+static void Lora_ProcesarLinea(const char *line, uint16_t line_len)
+{
+    Log_Printf("LORA", "[PRUEBA] Linea completa (%u bytes): %s", line_len, line);
+
+    /* ChirpStack/el gateway SIEMPRE manda el payload codificado en
+     * hex, incluyendo la palabra CONF — nunca llega en texto plano
+     * de verdad. Por eso la regla es fija: decodificar TODO primero,
+     * y ya sobre el resultado decodificado buscar "CONF". Ya no se
+     * adivina "es hex o es texto plano" mirando si hay comas. */
+    uint8_t decoded[300];
+    size_t  decoded_len = Lora_DecodeHexToBytes(line, decoded, sizeof(decoded) - 1U);
+    decoded[decoded_len] = '\0';
+    char *decoded_str = (char *)decoded;
+    Log_Printf("LORA", "[PRUEBA] Decodificado: %s", decoded_str);
+
+    char *conf_pos  = strstr(decoded_str, "CONF");
+    char *run_pos   = strstr(decoded_str, "RUN");
+    char *end_s_pos = strstr(decoded_str, "END_S");   /* revisar ANTES que "END" a secas */
+    char *end_pos   = strstr(decoded_str, "END");     /* "END" generico, END_S ya se atendio arriba */
+
+    if (conf_pos != NULL) {
+        const char *contenido = conf_pos + 4;
+        if (Lora_ParseDatos(contenido, &g_exercise_data)) {
+            Log_Print("LORA", "CONF recibido y guardado en g_exercise_data.");
+            s_lora_conf_listo = true;
+        } else {
+            Log_Print("LORA", "ERROR: CONF no se pudo parsear.");
+        }
+    } else if (run_pos != NULL) {
+        /* No se entra a MODO_EJERCICIO todavia aqui — falta que la
+         * Mira confirme con ACKRUN (ver BT_HandleRun() en
+         * BluetoothTask). Solo se avisa. */
+        Log_Print("LORA", "RUN recibido — avisando a BluetoothTask para mandar $RUN a la Mira.");
+        s_lora_run_recibido = true;
+    } else if (end_s_pos != NULL) {
+        /* No se termina el ejercicio todavia aqui — falta que la
+         * Mira confirme con ACKEND_S (ver BT_HandleEndS() en
+         * BluetoothTask). Solo se avisa. */
+        Log_Print("LORA", "END_S recibido — avisando a BluetoothTask para mandar $END_S a la Mira.");
+        s_lora_end_s_recibido = true;
+    } else if (end_pos != NULL) {
+        /* TODO: "END" a secas (sin "_S") sigue sin logica definida —
+         * de momento solo se loguea, no se hace nada mas. */
+        Log_Print("LORA", "END recibido — logica de fin de ejercicio pendiente de definir.");
+    } else {
+        Log_Printf("LORA", "RX no reconocido (ni crudo ni decodificado trae CONF/RUN/END): %s", line);
+    }
+}
+
+/**
+ * @brief  Manda la telemetria de 12 campos de vuelta al gateway
+ *         (ID,numOrden,vidas,municion,bateria,latitud,longitud,altitud,
+ *         orientacion,pasos,ack,timestamp — latitud ANTES que longitud,
+ *         ver g_exercise_data), codificada a hex sobre AT+QSEND=1:1:<hex>\r\n
+ *         (igual que mandarPorLora() del codigo de referencia).
+ * @note   El modulo LoRa no confirma nada por su cuenta — solo manda la
+ *         trama y ya, no hay "SEND_CONFIRMED" que esperar. (Antes si se
+ *         esperaba, bloqueando LoraTask hasta 10s cada vez porque ese
+ *         timeout SIEMPRE se agotaba sin gateway real — con eso se tragaba
+ *         en silencio cualquier $RUN/$END_S real que llegara justo en esa
+ *         ventana. Ya no se espera nada, se manda y se regresa de
+ *         inmediato.)
+ */
+static void Lora_EnviarTelemetria(void)
+{
+    char csv[160];
+    /* Solo bateria_ch (esta tarjeta) va en la telemetria por ahora —
+     * bateria_ap (Mira) todavia no se agrega aqui, ver TODO en
+     * Inicializacion.h (pendiente hasta actualizar la base de datos). */
+    /* Orden lat/lon: LATITUD antes que LONGITUD — asi lo manda de verdad
+     * generarCadena() del codigo de referencia del companero (CODIGO_LORA/
+     * lora_kg200z.c), aunque su propio comentario diga "longitud,latitud"
+     * (comentario desactualizado, el codigo real pasa latStr primero). */
+    int  n = snprintf(csv, sizeof(csv), "%u,%u,%u,%u,%u,%.5f,%.5f,%.1f,%u,%u,%u,%lu",
+                       g_exercise_data.lora, g_exercise_data.orden,
+                       g_exercise_data.lives, g_exercise_data.ammo,
+                       g_exercise_data.bateria_ch,
+                       (double)g_exercise_data.latitud, (double)g_exercise_data.longitud,
+                       (double)g_exercise_data.altitud,
+                       g_exercise_data.orientacion, g_exercise_data.pasos,
+                       g_exercise_data.ack, (unsigned long)g_exercise_data.timestamp);
+
+    if (n <= 0 || (size_t)n >= sizeof(csv)) {
+        Log_Print("LORA", "ERROR: CSV de telemetria demasiado grande.");
+        return;
+    }
+
+    char hex_payload[(sizeof(csv) * 2U) + 1U];
+    Lora_EncodeToHex((const uint8_t *)csv, (size_t)n, hex_payload);
+
+    char cmd[sizeof(hex_payload) + 16U];
+    int  cmd_len = snprintf(cmd, sizeof(cmd), "AT+QSEND=1:1:%s\r\n", hex_payload);
+    if (cmd_len <= 0 || (size_t)cmd_len >= sizeof(cmd)) {
+        Log_Print("LORA", "ERROR: comando AT+QSEND demasiado grande.");
+        return;
+    }
+
+    Lora_ResetRx(&s_lora_task);
+    Lora_Transmit(&s_lora_task, (const uint8_t *)cmd, (uint16_t)cmd_len);
+    Log_Printf("LORA", "Telemetria enviada: %s", csv);
+}
+
+/**
+ * @brief  Tarea de LoRa: recepcion por DMA circular + linea IDLE (mismo
+ *         patron que GpsTask), framing $...*** (ver Lora_StoreBytes() —
+ *         ChirpStack manda TODO codificado en hex, incluido el $/*, asi
+ *         que el cierre real que se busca es "2A2A2A" alineado en el
+ *         texto, no bytes crudos).
+ * @note   Al llegar una linea completa se decodifica TODO primero (nunca
+ *         se adivina si es hex o texto plano) y sobre el resultado se
+ *         busca, en este orden: "CONF" -> Lora_ParseDatos() directo a
+ *         g_exercise_data + marca s_lora_conf_listo (arranca BluetoothTask);
+ *         "RUN" -> Modo_SetOperacion(MODO_EJERCICIO) y arranca el ciclo de
+ *         telemetria cada LORA_EXERCISE_PERIOD_MS; "END" (cubre "END_S")
+ *         -> TODO, logica de fin de ejercicio pendiente de definir.
+ * @note   La telemetria de 12 campos (Lora_EnviarTelemetria()) se manda en
+ *         dos casos: una vez cuando BluetoothTask marca
+ *         s_lora_enviar_telemetria (tras ACKCONF), y periodica cada
+ *         LORA_EXERCISE_PERIOD_MS mientras g_modo_operacion==MODO_EJERCICIO.
+ */
+static void LoraTask(void *argument)
+{
+    (void)argument;
+
+    Log_Print("LORA", "LoraTask arrancada, esperando $CONF...");
+
+    /* El bring-up de Inicializacion.c (Lora_Setup/Lora_Connect, si no esta
+     * simulado) dejo el UART armado en modo IT — lo cancelamos limpio
+     * antes de pasar a modo DMA, igual que GpsTask con huart1. */
+    HAL_UART_AbortReceive(&huart2);
+
+    memset(&s_lora_task, 0, sizeof(s_lora_task));
+    s_lora_task.huart = LORA_UART;
+    s_lora_dma_last_pos = 0U;
+
+    HAL_UARTEx_ReceiveToIdle_DMA(LORA_UART, s_lora_dma_buf, LORA_DMA_BUF_SIZE);
+    g_lora_dma_activo = true;   /* HAL_UART_ErrorCallback ya no debe re-armar IT */
+
+    /* [PRUEBA] Cuanto llevabamos impreso la ultima vez — para mostrar
+     * CUALQUIER cosa que se vaya acumulando en rx_buffer aunque nunca
+     * llegue el '\r' que cierra la linea (framing incompleto/erroneo).
+     * Momentaneo, mientras validamos que la recepcion si esta llegando —
+     * quitar cuando el protocolo este cerrado. */
+    uint16_t last_printed_count = 0U;
+
+    /* Bug real encontrado 2026-09: sin un '$' crudo (nunca llega asi,
+     * ChirpStack manda todo en hex) el buffer nunca se resetea solo — algo
+     * que se quedo a medias (basura, ruido, un mensaje cortado) se queda
+     * ahi para siempre esperando un cierre, y el proximo mensaje real se le
+     * pega encima en vez de empezar limpio. accum_start_tick marca cuando
+     * empezo a acumularse la linea actual; si pasa LORA_STALE_TIMEOUT_MS
+     * sin cerrar, se descarta sola sin esperar a que llegue nada nuevo. */
+    uint32_t accum_start_tick = 0U;
+
+    /* Cada LORA_EXERCISE_PERIOD_MS, mientras estemos en MODO_EJERCICIO, se
+     * manda la telemetria completa — arranca al recibir $RUN (ver abajo). */
+    uint32_t last_exercise_tx = 0U;
+
+    for (;;) {
+        if ((g_modo_operacion == MODO_EJERCICIO) &&
+            ((HAL_GetTick() - last_exercise_tx) >= LORA_EXERCISE_PERIOD_MS)) {
+            last_exercise_tx = HAL_GetTick();
+            Lora_EnviarTelemetria();
+        }
+
+        if (s_lora_task.rx_ready) {
+            Lora_ProcesarLinea((char *)s_lora_task.rx_buffer, s_lora_task.rx_count);
+
+            Lora_ResetRx(&s_lora_task);
+            last_printed_count = 0U;
+            accum_start_tick   = 0U;
+        } else {
+            if (s_lora_task.rx_count != last_printed_count) {
+                if (last_printed_count == 0U) {
+                    accum_start_tick = HAL_GetTick();   /* empezo a acumularse justo ahora */
+                }
+                last_printed_count = s_lora_task.rx_count;
+                /* [PRUEBA] Todavia no llega el cierre "***" que cierre la
+                 * linea, pero algo se esta acumulando — imprimirlo igual
+                 * para depurar framing (ver nota arriba). */
+                Log_Printf("LORA", "[PRUEBA] Acumulando (%u bytes, sin * todavia): %s",
+                           s_lora_task.rx_count, (char *)s_lora_task.rx_buffer);
+            }
+
+            if ((s_lora_task.rx_count > 0U) &&
+                ((HAL_GetTick() - accum_start_tick) >= LORA_STALE_TIMEOUT_MS)) {
+                Log_Printf("LORA", "Buffer atascado %lums sin cerrar (%u bytes) — se descarta.",
+                           (unsigned long)(HAL_GetTick() - accum_start_tick), s_lora_task.rx_count);
+                Lora_ResetRx(&s_lora_task);
+                last_printed_count = 0U;
+                accum_start_tick   = 0U;
+            }
+        }
+
+        if (s_lora_enviar_telemetria) {
+            s_lora_enviar_telemetria = false;
+            Lora_EnviarTelemetria();
+        }
+
+        osDelay(50U);
     }
 }
 
@@ -212,19 +481,18 @@ static void SensorsTask(void *argument)
     I2C1Bus_Lock();
     HAL_StatusTypeDef light_begin_st = TSL2571_Begin(&s_light_task, 0xC0U, TSL2571_GAIN_1X);
     I2C1Bus_Unlock();
-    if (light_begin_st == HAL_OK) {
-        Log_Print("SENSORS", "TSL2571 (luz) listo.");
-    } else {
-        Log_Print("SENSORS", "ERROR: TSL2571_Begin fallo.");
-    }
+    bool luz_ok = (light_begin_st == HAL_OK);
 
-    if (LSM6DSO32TR_Init(&s_imu_task) == LSM_OK) {
-        Log_Print("SENSORS", "LSM6DSO32TR (IMU) listo.");
-    } else {
-        Log_Print("SENSORS", "ERROR: LSM6DSO32TR_Init fallo.");
-    }
+    bool imu_ok = (LSM6DSO32TR_Init(&s_imu_task) == LSM_OK);
 
-    Log_Print("SENSORS", "SensorsTask lista, arrancando ciclo de lectura.");
+    /* Una sola linea de resumen en vez de 3 separadas — mas facil de leer
+     * de un vistazo en el logger. */
+    if (luz_ok && imu_ok) {
+        Log_Print("SENSORS", "Sensores configurados y listos (luz=OK imu=OK), arrancando ciclo de lectura.");
+    } else {
+        Log_Printf("SENSORS", "Sensores configurados con errores (luz=%s imu=%s), arrancando ciclo de lectura.",
+                   luz_ok ? "OK" : "FALLO", imu_ok ? "OK" : "FALLO");
+    }
 
     for (;;) {
         float lux = 0.0f;
@@ -241,7 +509,7 @@ static void SensorsTask(void *argument)
         BatGauge_Update(&bat_data);
         I2C1Bus_Unlock();
         if (bat_data.is_ready) {
-            g_exercise_data.lvBatery = bat_data.soc_pct;
+            g_exercise_data.bateria_ch = bat_data.soc_pct;   /* bateria de ESTA tarjeta */
         }
 
         LSM_Data_t imu_data;
@@ -258,7 +526,13 @@ static void SensorsTask(void *argument)
             g_exercise_data.mag_z_uT = mag_data.z_uT;
         }
 
-        Inicializacion_PrintSensorsData();
+        /* Detalle completo (bateria/lux/mag/gyro) comentado a proposito
+         * mientras se depura BLE+LoRa — ensuciaba mucho el logger. Solo se
+         * deja esta linea corta para confirmar que el ciclo si corrio.
+         * Descomentar Inicializacion_PrintSensorsData() cuando haga falta
+         * ver el detalle de sensores otra vez. */
+        // Inicializacion_PrintSensorsData();
+        Log_Print("SENSORS", "TASKSensores");
 
         osDelay(SENSORS_PERIOD_MS);
     }
@@ -298,15 +572,7 @@ static void CalibrateTask(void *argument)
                     }
 
                     if (dato == CALIB_VALID_WORD) {
-                        for (uint8_t j = 0U; j < 3U; j++) {
-                            LP55231_SetChannelPWM(&rgb, rgb_red_ch[j],  0xFFU);
-                            LP55231_SetChannelPWM(&rgb, rgb_blue_ch[j], 0xFFU);
-                        }
-                        osDelay(CALIB_BLINK_MS);
-                        for (uint8_t j = 0U; j < 3U; j++) {
-                            LP55231_SetChannelPWM(&rgb, rgb_red_ch[j],  0x00U);
-                            LP55231_SetChannelPWM(&rgb, rgb_blue_ch[j], 0x00U);
-                        }
+                        Leds_ParpadeoCalibracionOk();
                     }
 
                     Log_Printf("CALIB", "Impacto: 0x%04X", dato);
@@ -344,34 +610,40 @@ static void BT_SleepAndLog(uint32_t ms)
 }
 
 /**
- * @brief  Blinkea rojo/azul/magenta en los 3 pares fisicos N veces, con
- *         periodo on/off period_ms. Helper compartido de BluetoothTask.
- *         Usa BT_SleepAndLog() en vez de osDelay() para no perder de vista
+ * @brief  Blinkea rojo/verde/azul (o combinaciones: cian=verde+azul,
+ *         magenta=rojo+azul) en los 3 pares fisicos N veces, con periodo
+ *         on/off period_ms. Helper compartido de BluetoothTask. Usa
+ *         BT_SleepAndLog() en vez de osDelay() para no perder de vista
  *         nada que llegue por Bluetooth mientras parpadea.
  */
-static void BT_Blink(bool red, bool blue, uint32_t period_ms, uint8_t count)
+static void BT_Blink(bool red, bool green, bool blue, uint32_t period_ms, uint8_t count)
 {
     for (uint8_t i = 0U; i < count; i++) {
-        for (uint8_t j = 0U; j < 3U; j++) {
-            if (red)  LP55231_SetChannelPWM(&rgb, rgb_red_ch[j],  0xFFU);
-            if (blue) LP55231_SetChannelPWM(&rgb, rgb_blue_ch[j], 0xFFU);
-        }
+        if (red)   Leds_SetRojo(true);
+        if (green) Leds_SetVerde(true);
+        if (blue)  Leds_SetAzul(true);
         BT_SleepAndLog(period_ms);
-        for (uint8_t j = 0U; j < 3U; j++) {
-            if (red)  LP55231_SetChannelPWM(&rgb, rgb_red_ch[j],  0x00U);
-            if (blue) LP55231_SetChannelPWM(&rgb, rgb_blue_ch[j], 0x00U);
-        }
+        if (red)   Leds_SetRojo(false);
+        if (green) Leds_SetVerde(false);
+        if (blue)  Leds_SetAzul(false);
         BT_SleepAndLog(period_ms);
     }
 }
 
 /**
  * @brief  Maneja "$DSCON" — llega en cualquier momento, sin importar que
- *         estabamos esperando. Responde $ACKDSCON, parpadea rojo
- *         BT_DSCON_BLINK_COUNT veces (BT_DSCON_BLINK_MS), y deja el estado
- *         listo para reintentar el enlace desde cero.
+ *         estabamos esperando. Responde $ACKDSCON y parpadea cian
+ *         (verde+azul) LEDS_BT_DSCON_COUNT veces (LEDS_BT_DSCON_MS) —
+ *         homologado con la secuencia equivalente de la Mira (prompt del
+ *         usuario, 2026-09-09).
  * @note   El modulo Bluetooth es quien retransmite el ACKDSCON si hace
  *         falta — nosotros no reintentamos el envio.
+ * @note   TODO: todavia no hay logica de reintento de enlace tras una
+ *         desconexion — pendiente a proposito. Por eso esta funcion NUNCA
+ *         regresa: tras el parpadeo rojo se queda inerte (nada de volver a
+ *         parpadear azul intentando reconectar, seria enganoso porque el
+ *         modulo Bluetooth tampoco tiene todavia codigo para reconectarse
+ *         solo). Los callers NO deben poner codigo despues de llamarla.
  */
 static void BT_HandleDSCON(void)
 {
@@ -382,7 +654,119 @@ static void BT_HandleDSCON(void)
     s_bt_conectado  = false;
     s_ack_pendiente = ACK_NINGUNO;
 
-    BT_Blink(true, false, BT_DSCON_BLINK_MS, BT_DSCON_BLINK_COUNT);
+    BT_Blink(false, true, true, LEDS_BT_DSCON_MS, LEDS_BT_DSCON_COUNT);   /* cian = verde+azul */
+
+    Log_Print("BT", "TODO: reintento de enlace pendiente de definir — BluetoothTask se queda inerte.");
+    for (;;) {
+        osDelay(1000U);
+    }
+}
+
+/**
+ * @brief  Maneja el arranque de MODO_EJERCICIO: manda "$RUN\r" a la Mira,
+ *         espera "ACKRUN" (sin timeout, mismo criterio que ACKCON — $RUN ya
+ *         lo confirmo el gateway por LoRa, no tiene sentido abandonar la
+ *         espera) y, al confirmarse, hace la señal visual de arranque:
+ *         parpadeo rapido magenta (LEDS_RUN_CUENTA_COUNT x LEDS_RUN_CUENTA_MS)
+ *         seguido de un parpadeo corto de confirmacion (LEDS_RUN_INICIO_COUNT
+ *         x LEDS_RUN_INICIO_MS). Recien ahi entra a
+ *         MODO_EJERCICIO de verdad (Modo_SetOperacion), que es lo que
+ *         arranca el envio periodico de telemetria en LoraTask.
+ * @note   Llamada desde el loop de escucha de BluetoothTask cuando LoraTask
+ *         marca s_lora_run_recibido — ver ahi.
+ */
+static void BT_HandleRun(void)
+{
+    static const uint8_t run_msg[] = "$RUN\r";
+    Bt_Transmit(&s_bt_task, run_msg, sizeof(run_msg) - 1U);
+    s_ack_pendiente = ACK_RUN;
+    Log_Print("BT", "RUN enviado a la Mira, esperando ACKRUN...");
+
+    while (s_ack_pendiente == ACK_RUN) {
+        if (s_bt_task.rx_ready) {
+            if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
+                Bt_ResetRx(&s_bt_task);
+                BT_HandleDSCON();   /* nunca regresa, ver su doc comment */
+            }
+            if (strcmp((char *)s_bt_task.rx_buffer, "ACKRUN") == 0) {
+                Bt_ResetRx(&s_bt_task);
+                s_ack_pendiente = ACK_NINGUNO;
+                break;
+            }
+            Log_Printf("BT", "Esperaba ACKRUN, llego: %s", (char *)s_bt_task.rx_buffer);
+            Bt_ResetRx(&s_bt_task);
+        }
+        osDelay(20U);
+    }
+
+    Log_Print("BT", "ACKRUN recibido — parpadeo visual de arranque (magenta).");
+    Leds_ParpadeoMagenta(LEDS_RUN_CUENTA_COUNT, LEDS_RUN_CUENTA_MS);
+    Leds_ParpadeoMagenta(LEDS_RUN_INICIO_COUNT, LEDS_RUN_INICIO_MS);
+
+    Modo_SetOperacion(MODO_EJERCICIO);
+    Log_Print("BT", "MODO_EJERCICIO activo.");
+}
+
+/**
+ * @brief  Maneja el fin de ejercicio por orden del administrador ($END_S
+ *         por LoRa, el encargado detiene la partida a media partida): manda
+ *         "$END_S\r" a la Mira, espera "ACKEND_S" (sin timeout, mismo
+ *         criterio que ACKRUN) y, al confirmarse, parpadea rojo
+ *         LEDS_END_S_COUNT veces (LEDS_END_S_MS) — homologado con la
+ *         secuencia equivalente de la Mira (prompt del usuario, 2026-09-09).
+ *         Termina el ejercicio: regresa a MODO_CONFIGURACION, lo que ya
+ *         detiene el envio periodico de telemetria en LoraTask (gateado por
+ *         g_modo_operacion == MODO_EJERCICIO, ver ahi).
+ * @note   Llamada desde el loop de escucha de BluetoothTask cuando LoraTask
+ *         marca s_lora_end_s_recibido — ver ahi.
+ */
+static void BT_HandleEndS(void)
+{
+    static const uint8_t end_s_msg[] = "$END_S\r";
+    Bt_Transmit(&s_bt_task, end_s_msg, sizeof(end_s_msg) - 1U);
+    s_ack_pendiente = ACK_END_S;
+    Log_Print("BT", "END_S enviado a la Mira, esperando ACKEND_S...");
+
+    while (s_ack_pendiente == ACK_END_S) {
+        if (s_bt_task.rx_ready) {
+            if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
+                Bt_ResetRx(&s_bt_task);
+                BT_HandleDSCON();   /* nunca regresa, ver su doc comment */
+            }
+            if (strcmp((char *)s_bt_task.rx_buffer, "ACKEND_S") == 0) {
+                Bt_ResetRx(&s_bt_task);
+                s_ack_pendiente = ACK_NINGUNO;
+                break;
+            }
+            Log_Printf("BT", "Esperaba ACKEND_S, llego: %s", (char *)s_bt_task.rx_buffer);
+            Bt_ResetRx(&s_bt_task);
+        }
+        osDelay(20U);
+    }
+
+    Log_Print("BT", "ACKEND_S recibido — ejercicio terminado, parpadeo rojo.");
+    Leds_ParpadeoRojo(LEDS_END_S_COUNT, LEDS_END_S_MS);
+
+    Modo_SetOperacion(MODO_CONFIGURACION);
+    Log_Print("BT", "MODO_CONFIGURACION activo — telemetria periodica detenida.");
+}
+
+/**
+ * @brief  Maneja "$END_A" — la Mira avisa que termino el ejercicio de su
+ *         lado (por Bluetooth, directo, no pasa por LoRa). Responde
+ *         "$ACKEND_A\r", hace la secuencia visual colorida de fin de juego
+ *         (Leds_ParpadeoFinJuego()) y regresa a MODO_CONFIGURACION.
+ */
+static void BT_HandleEndA(void)
+{
+    static const uint8_t ackend_a[] = "$ACKEND_A\r";
+    Bt_Transmit(&s_bt_task, ackend_a, sizeof(ackend_a) - 1U);
+    Log_Print("BT", "END_A recibido — ACKEND_A enviado, parpadeo de fin de juego.");
+
+    Leds_ParpadeoFinJuego();
+
+    Modo_SetOperacion(MODO_CONFIGURACION);
+    Log_Print("BT", "MODO_CONFIGURACION activo.");
 }
 
 /**
@@ -397,10 +781,11 @@ static void BT_HandleDSCON(void)
  *         mac1, mac2 no se manda) -> espera "ACKCONF" hasta
  *         BT_ACKCONF_TIMEOUT_MS -> loop de escucha para siempre.
  *         "$DSCON" se atiende SIEMPRE, en cualquier punto de la secuencia
- *         (ver BT_HandleDSCON()) y regresa al inicio (reintenta el enlace).
- * @note   TODO: por ahora la secuencia arranca sola al inicio de la tarea
- *         en vez de esperar a que LoraTask confirme un $CONF real — no
- *         existe LoraTask todavia (ver bloque [PRUEBA] arriba).
+ *         (ver BT_HandleDSCON()) — parpadea rojo y la tarea se queda
+ *         inerte, NO reintenta el enlace (pendiente a proposito, ver TODO
+ *         en BT_HandleDSCON()).
+ * @note   Espera a s_lora_conf_listo (LoraTask ya recibio y guardo un
+ *         $CONF real) antes de mandar $CON — ya no hay delay simulado.
  * @note   TODO: que hacer tras un timeout de ACKCONF (reintentar, reportar
  *         error, etc.) sigue pendiente de definir — de momento solo se
  *         loguea y se sigue al loop de escucha.
@@ -412,20 +797,17 @@ static void BluetoothTask(void *argument)
     Bt_Init(&s_bt_task);
     Log_Print("BT", "BluetoothTask arrancada.");
 
-reconectar:
     s_bt_conectado  = false;
     s_ack_pendiente = ACK_NINGUNO;
 
-    /* [PRUEBA] Simulacion de la llegada por LoRa — quitar cuando exista
-     * LoraTask real (ver nota arriba y en Inicializacion.c). Ya no
-     * parpadea, solo espera BT_SIM_LORA_MS (5s) despues del parpadeo verde
-     * de fin de Inicializacion_Run(). */
-    Log_Printf("BT", "[PRUEBA] Datos (simulados): orden=%u lora=%u equipo=%s alias=%s vidas=%u balas=%u tiempo=%lu mac=%s",
+    Log_Print("BT", "Esperando $CONF por LoRa...");
+    while (!s_lora_conf_listo) {
+        osDelay(50U);
+    }
+    Log_Printf("BT", "Datos de LoRa listos: orden=%u lora=%u equipo=%s alias=%s vidas=%u balas=%u tiempo=%lu mac=%s",
                g_exercise_data.orden, g_exercise_data.lora, g_exercise_data.team_name,
                g_exercise_data.player_name, g_exercise_data.lives, g_exercise_data.ammo,
                (unsigned long)g_exercise_data.tiempo, g_exercise_data.mac);
-    Log_Print("BT", "[PRUEBA] Simulando espera de LoRa (5s)...");
-    BT_SleepAndLog(BT_SIM_LORA_MS);
 
     Bt_SendAdvertise(&s_bt_task, g_exercise_data.mac);   /* $CON<mac>\r */
     s_ack_pendiente = ACK_CON;
@@ -437,8 +819,7 @@ reconectar:
         if (s_bt_task.rx_ready) {
             if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
                 Bt_ResetRx(&s_bt_task);
-                BT_HandleDSCON();
-                goto reconectar;
+                BT_HandleDSCON();   /* nunca regresa, ver su doc comment */
             }
             /* strcmp exacto, no strncmp de prefijo: "ACKCONF" empieza con
              * las mismas 6 letras que "ACKCON" y haria falso match aqui. */
@@ -449,15 +830,13 @@ reconectar:
             }
             Log_Printf("BT", "Esperaba ACKCON, llego: %s", (char *)s_bt_task.rx_buffer);
             Bt_ResetRx(&s_bt_task);
-            BT_Blink(true, false, 400U, 3U);
+            BT_Blink(true, false, false, LEDS_BT_ERROR_MS, LEDS_BT_ERROR_COUNT);
         }
 
         if ((HAL_GetTick() - last_blink) >= BT_BLINK_MS) {
             last_blink = HAL_GetTick();
             led_on     = !led_on;
-            for (uint8_t j = 0U; j < 3U; j++) {
-                LP55231_SetChannelPWM(&rgb, rgb_blue_ch[j], led_on ? 0xFFU : 0x00U);
-            }
+            Leds_SetAzul(led_on);
         }
 
         osDelay(20U);
@@ -465,9 +844,7 @@ reconectar:
 
     /* Enlazados — LEDs azules fijos mientras Mira y nosotros intercambiamos
      * servicios/configuracion. Se apagan hasta que llegue ACKCONF. */
-    for (uint8_t j = 0U; j < 3U; j++) {
-        LP55231_SetChannelPWM(&rgb, rgb_blue_ch[j], 0xFFU);
-    }
+    Leds_SetAzul(true);
     s_bt_conectado = true;
     Log_Print("BT", "ACKCON recibido — enlazados, esperando READY...");
 
@@ -475,8 +852,7 @@ reconectar:
         if (s_bt_task.rx_ready) {
             if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
                 Bt_ResetRx(&s_bt_task);
-                BT_HandleDSCON();
-                goto reconectar;
+                BT_HandleDSCON();   /* nunca regresa, ver su doc comment */
             }
             if (strncmp((char *)s_bt_task.rx_buffer, "READY", 5U) == 0) {
                 Bt_ResetRx(&s_bt_task);
@@ -512,8 +888,7 @@ reconectar:
         if (s_bt_task.rx_ready) {
             if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
                 Bt_ResetRx(&s_bt_task);
-                BT_HandleDSCON();
-                goto reconectar;
+                BT_HandleDSCON();   /* nunca regresa, ver su doc comment */
             }
             if (strncmp((char *)s_bt_task.rx_buffer, "ACKCONF", 7U) == 0) {
                 s_ack_pendiente = ACK_NINGUNO;
@@ -527,30 +902,71 @@ reconectar:
 
     if (s_ack_pendiente == ACK_NINGUNO) {
         Log_Print("BT", "ACKCONF recibido.");
+        /* Senal para LoraTask: ya se confirmo el CONF con Mira, toca
+         * mandar la telemetria de vuelta al gateway con ack=1. */
+        g_exercise_data.ack   = 1U;
+        s_lora_enviar_telemetria = true;
     } else {
         s_ack_pendiente = ACK_NINGUNO;
         Log_Print("BT", "ERROR: no llego ACKCONF a tiempo.");
-        /* TODO: pendiente de definir que hacemos aqui (reintentar, etc.). */
+        g_exercise_data.ack   = 0U;
+        s_lora_enviar_telemetria = true;
+        /* TODO: pendiente de definir que mas hacemos aqui (reintentar, etc.). */
     }
 
     /* Ya se confirmo el intercambio (o se agoto el tiempo) — no hace falta
      * seguir indicando "enlazados" con los LEDs. */
-    for (uint8_t j = 0U; j < 3U; j++) {
-        LP55231_SetChannelPWM(&rgb, rgb_blue_ch[j], 0x00U);
-    }
+    Leds_Apagar();
 
     /* Loop de escucha para siempre — DSCON se atiende aqui tambien, en
      * cualquier momento de la partida. */
     Log_Print("BT", "BluetoothTask entra al loop de escucha.");
     for (;;) {
+        if (s_lora_run_recibido) {
+            s_lora_run_recibido = false;
+            BT_HandleRun();
+        }
+
+        if (s_lora_end_s_recibido) {
+            s_lora_end_s_recibido = false;
+            BT_HandleEndS();
+        }
+
         if (s_bt_task.rx_ready) {
-            if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
+            char *line = (char *)s_bt_task.rx_buffer;
+
+            if (strncmp(line, "DSCON", 5U) == 0) {
                 Bt_ResetRx(&s_bt_task);
-                BT_HandleDSCON();
-                goto reconectar;
+                BT_HandleDSCON();   /* nunca regresa, ver su doc comment */
+            } else if (strncmp(line, "END_A", 5U) == 0) {
+                Bt_ResetRx(&s_bt_task);
+                BT_HandleEndA();
+            } else if (strncmp(line, "A_AP", 4U) == 0) {
+                /* $A_AP<balas>,<pct_bateria>\r — Mira lo manda cada 200ms
+                 * (solo si cambio algo). Actualiza municion y bateria_ap;
+                 * bateria_ap NO se agrega todavia a la telemetria LoRa, ver
+                 * comentario en Inicializacion.h. La Mira necesita el ACK
+                 * de cada uno para saber que si llego (ver pregunta del
+                 * usuario, 2026-09-08) — se manda siempre, tanto si el
+                 * parseo salio bien como si vino mal formado. */
+                const char *contenido = line + 4;
+                char *coma = strchr(contenido, ',');
+                if (coma != NULL) {
+                    int balas   = atoi(contenido);
+                    int bateria = atoi(coma + 1);
+                    g_exercise_data.ammo       = (uint16_t)balas;
+                    g_exercise_data.bateria_ap = (uint8_t)bateria;
+                    Log_Printf("BT", "A_AP recibido: balas=%d bateria_ap=%d%%", balas, bateria);
+                } else {
+                    Log_Printf("BT", "ERROR: A_AP mal formado: %s", line);
+                }
+                static const uint8_t ack_a_ap[] = "$ACKA_AP\r";
+                Bt_Transmit(&s_bt_task, ack_a_ap, sizeof(ack_a_ap) - 1U);
+                Bt_ResetRx(&s_bt_task);
+            } else {
+                Log_Printf("BT", "RX no reconocido: %s", line);
+                Bt_ResetRx(&s_bt_task);
             }
-            Log_Printf("BT", "RX no reconocido: %s", (char *)s_bt_task.rx_buffer);
-            Bt_ResetRx(&s_bt_task);
         }
         osDelay(20U);
     }
@@ -569,6 +985,7 @@ void Tareas_InicializarMutex(void)
 void Tareas_CrearTareas(void)
 {
     gpsTaskHandle     = osThreadNew(GpsTask, NULL, &gpsTask_attributes);
+    loraTaskHandle    = osThreadNew(LoraTask, NULL, &loraTask_attributes);
     sensorsTaskHandle = osThreadNew(SensorsTask, NULL, &sensorsTask_attributes);
     calibrateTaskHandle = osThreadNew(CalibrateTask, NULL, &calibrateTask_attributes);
     loggerTaskHandle  = osThreadNew(Log_Task, NULL, &loggerTask_attributes);
@@ -592,19 +1009,29 @@ void Tareas_CrearTareas(void)
  */
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
-    if (huart->Instance != GPS_UART->Instance) {
+    if (huart->Instance == GPS_UART->Instance) {
+        if (Size >= s_gps_dma_last_pos) {
+            Gps_StoreBytes(&s_gps_task, &s_gps_dma_buf[s_gps_dma_last_pos],
+                           (uint16_t)(Size - s_gps_dma_last_pos));
+        } else {
+            /* El DMA le dio la vuelta al buffer entre el evento anterior y este. */
+            Gps_StoreBytes(&s_gps_task, &s_gps_dma_buf[s_gps_dma_last_pos],
+                           (uint16_t)(GPS_DMA_BUF_SIZE - s_gps_dma_last_pos));
+            Gps_StoreBytes(&s_gps_task, &s_gps_dma_buf[0], Size);
+        }
+        s_gps_dma_last_pos = Size;
         return;
     }
 
-    if (Size >= s_gps_dma_last_pos) {
-        Gps_StoreBytes(&s_gps_task, &s_gps_dma_buf[s_gps_dma_last_pos],
-                       (uint16_t)(Size - s_gps_dma_last_pos));
-    } else {
-        /* El DMA le dio la vuelta al buffer entre el evento anterior y este. */
-        Gps_StoreBytes(&s_gps_task, &s_gps_dma_buf[s_gps_dma_last_pos],
-                       (uint16_t)(GPS_DMA_BUF_SIZE - s_gps_dma_last_pos));
-        Gps_StoreBytes(&s_gps_task, &s_gps_dma_buf[0], Size);
+    if (huart->Instance == LORA_UART->Instance) {
+        if (Size >= s_lora_dma_last_pos) {
+            Lora_StoreBytes(&s_lora_task, &s_lora_dma_buf[s_lora_dma_last_pos],
+                            (uint16_t)(Size - s_lora_dma_last_pos));
+        } else {
+            Lora_StoreBytes(&s_lora_task, &s_lora_dma_buf[s_lora_dma_last_pos],
+                            (uint16_t)(LORA_DMA_BUF_SIZE - s_lora_dma_last_pos));
+            Lora_StoreBytes(&s_lora_task, &s_lora_dma_buf[0], Size);
+        }
+        s_lora_dma_last_pos = Size;
     }
-
-    s_gps_dma_last_pos = Size;
 }

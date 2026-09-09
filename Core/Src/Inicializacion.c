@@ -27,6 +27,7 @@
 
 #if INIT_RGB_ENABLE
 #include "Driver_RGB.h"
+#include "Secuencia_Leds.h"
 #endif
 
 #if INIT_BUZZER_ENABLE
@@ -102,6 +103,12 @@
 /* Cuanto esperamos tramas NMEA del GPS antes de darlo por sin respuesta. */
 #define INIT_GPS_WAIT_MS             4000U
 
+/* [PRUEBA] Sin gateway LoRa disponible todavia — Lora_Setup()/Lora_Connect()
+ * fallarian siempre (no hay con quien hacer join). En 1U se simula que
+ * salio todo bien (Diagnostico.lora=true) sin tocar el modulo real; poner
+ * en 0U en cuanto haya gateway para probar la configuracion de verdad. */
+#define LORA_SIMULAR_SIN_GATEWAY     1U
+
 #if INIT_RGB_ENABLE
 /* Par1 del mapeo fisico confirmado de esta tarjeta: D1=verde, D2=rojo, D7=azul. */
 #define INIT_LED_CH_GREEN            0U   /* D1 — modo Logger            */
@@ -114,7 +121,7 @@
  * la vez — mismo rol por posicion (verde/rojo/azul) en los tres. NO
  * estaticos — Tareas.c los referencia con "extern" para el parpadeo
  * magenta de CalibrateTask (mismo patron que "rgb" un poco mas abajo). */
-#define INIT_RAINBOW_STEP_MS         600U
+#define INIT_RAINBOW_STEP_MS         300U
 const uint8_t rgb_green_ch[3] = { 0U, 2U, 4U };  /* D1, D3, D5 */
 const uint8_t rgb_red_ch[3]   = { 1U, 3U, 5U };  /* D2, D4, D6 */
 const uint8_t rgb_blue_ch[3]  = { 6U, 7U, 8U };  /* D7, D8, D9 */
@@ -148,10 +155,15 @@ extern Bt_Handle_t s_bt_task;
 
 #if INIT_GPS_ENABLE
 extern UART_HandleTypeDef huart1;   /* GPS_UART = &huart1, ver GPS.h */
+/* Definida en Tareas.c, NO estatica — HAL_UART_ErrorCallback la revisa
+ * para saber si GpsTask ya tomo el control con DMA (ver su comentario). */
+extern bool g_gps_dma_activo;
 #endif
 
 #if INIT_LORA_ENABLE
 extern UART_HandleTypeDef huart2;   /* LORA_UART = &huart2, ver Lora.h */
+/* Definida en Tareas.c, NO estatica — mismo motivo que g_gps_dma_activo. */
+extern bool g_lora_dma_activo;
 #endif
 
 /* ======================  STATIC VARIABLES  ================================ */
@@ -229,7 +241,7 @@ ExerciseGameData_t g_exercise_data = {
     .ammo        = 100U,
     .tiempo      = 60U,
     .mac         = "01F51DDE41B911",
-    .lvBatery    = 100U,
+    .bateria_ch  = 100U,
 };
 
 /* Prioridades NVIC — FIJAS, no se intercambian en runtime (decision
@@ -465,7 +477,94 @@ void Inicializacion_Run(void) {
     HAL_Delay(INIT_STEP_DELAY_MS);
 #endif
 
+#if INIT_RX_IR_ENABLE
+    Log_Blank();
+    Log_Print("RX_IR", "Inicializando receptor IR (EXTI+DWT)...");
+    IR_Init(&ir_handle);
+    Diagnostico.rx_ir = true;   /* Solo init — sin transmisor externo no hay forma de autoverificar */
+    Log_Print("RX_IR", "Receptor IR listo — no se hace poll aqui, requiere un transmisor externo disparando.");
+    HAL_Delay(INIT_STEP_DELAY_MS);
+#endif
+
+#if INIT_RGB_ENABLE
+    Log_Blank();
+    Log_Print("RGB", "Probando arcoiris...");
+    for (uint8_t i = 0U; i < INIT_RAINBOW_COLOR_COUNT; i++) {
+        const InitRgbColor_t *c = &s_rainbow[i];
+        Leds_SetRojo(c->r != 0U);
+        Leds_SetVerde(c->g != 0U);
+        Leds_SetAzul(c->b != 0U);
+        HAL_Delay(INIT_RAINBOW_STEP_MS);
+    }
+    Leds_Apagar();
+    Diagnostico.rgb = true;
+    Log_Print("RGB", "Prueba de arcoiris terminada.");
+    HAL_Delay(INIT_STEP_DELAY_MS);
+#endif
+
+#if INIT_GPS_ENABLE
+    Log_Blank();
+    Log_Print("GPS", "Inicializando GPS (L86-M33/L76-L)...");
+    Gps_Init(&s_gps);
+    HAL_Delay(200U);
+    Gps_SendMTK(&s_gps, GPS_OUTPUT_RMC_GGA);
+    Gps_SendMTK(&s_gps, GPS_FIX_0_5HZ);
+    Log_Print("GPS", "Configurado (RMC+GGA a 0.5Hz, cada 2s). Esperando tramas...");
+
+    /* No exigimos fix (dificil en interiores) — solo confirmamos que estan
+     * llegando bytes reales del modulo, imprimiendo un par de tramas NMEA
+     * crudas tal como llegan. */
+    uint32_t gps_wait_start    = HAL_GetTick();
+    uint8_t  gps_lines_printed = 0U;
+    while (((HAL_GetTick() - gps_wait_start) < INIT_GPS_WAIT_MS) && (gps_lines_printed < 2U)) {
+        if (s_gps.sentence_ready) {
+            Log_Printf("GPS-RAW", "%s", s_gps.sentence);
+            gps_lines_printed++;
+        }
+        Gps_Process(&s_gps);
+    }
+
+    if (gps_lines_printed == 0U) {
+        Log_Print("GPS", "ERROR: no se recibio ninguna trama NMEA — revisar USART1/modulo.");
+    } else {
+        Diagnostico.gps = true;
+        Log_Print("GPS", "Comunicacion confirmada.");
+    }
+    HAL_Delay(INIT_STEP_DELAY_MS);
+#endif
+
+#if INIT_LORA_ENABLE
+    /* Ultimo paso del init a proposito: es configuracion con el GATEWAY
+     * (no con el gadget local, como los demas AT) — si no queda bien
+     * configurado y enlazado, no tiene caso seguir. Bloqueante, se queda
+     * aqui hasta que Lora_Setup()+Lora_Connect() confirmen exito. */
+    Log_Blank();
+    Lora_Init(&s_lora);   /* ya imprime "Iniciando modulo LoRa..." internamente */
+
+#if LORA_SIMULAR_SIN_GATEWAY
+    Diagnostico.lora = true;
+    Log_Print("LORA", "[PRUEBA] Sin gateway disponible — se simula configuracion/enlace OK.");
+#else
+    if (Lora_Setup(&s_lora) == LORA_OK && Lora_Connect(&s_lora) == LORA_OK) {
+        Diagnostico.lora = true;
+        Log_Print("LORA", "Modulo configurado y enlazado con el gateway.");
+    } else {
+        Log_Print("LORA", "ERROR: fallo la configuracion/enlace con el gateway — revisar USART2/modulo.");
+    }
+#endif
+    HAL_Delay(INIT_STEP_DELAY_MS);
+#endif
+
 #if INIT_BLUETOOTH_ENABLE
+    /* Movido a proposito hasta el final del init (justo antes del
+     * Diagnostico_Print() de abajo) — antes estaba a la mitad entre LUZ y
+     * RX_IR, cortando la secuencia de sensores. Este es el bring-up
+     * bloqueante (smoke test con AT\r/AT I 3/AT+RUN) — NO es el mismo
+     * Bt_Init() que corre despues, ya con el RTOS vivo, dentro de
+     * BluetoothTask() (ese es el que arma la recepcion por interrupcion
+     * para la tarea real — son dos pasos distintos y ambos hacen falta,
+     * por eso "Iniciando modulo Bluetooth BL654..." sale dos veces en el
+     * log: una aqui (bring-up) y otra cuando arranca BluetoothTask). */
     Log_Blank();
     Log_Print("BT", "Iniciando modulo Bluetooth BL654...");
     /* Enlace manual (sin Bt_Init()) — Bt_Init() arma HAL_UART_Receive_IT(),
@@ -503,97 +602,17 @@ void Inicializacion_Run(void) {
 
             /* Arranca nuestro programa/script en el modulo — solo si el BT
              * salio sano arriba. Antes de crear las tareas, para que
-             * BluetoothTask ya se encuentre el modulo corriendo. */
-            Log_Print("BT", "Arrancando programa SensoresM (AT+RUN)...");
+             * BluetoothTask ya se encuentre el modulo corriendo. 100ms de
+             * margen tras confirmar que el modulo esta sano antes de
+             * mandar el comando. AT+RUN NO regresa ninguna respuesta (a
+             * diferencia de AT/AT I 3) — SensoresM simplemente arranca su
+             * propio script en el modulo, asi que aqui solo se manda y se
+             * loguea que se mando, sin esperar ni revisar nada. */
+            HAL_Delay(100U);
             static const uint8_t cmd_run[] = "AT+RUN \"SensoresM\"\r";
             Bt_Transmit(&s_bt, cmd_run, sizeof(cmd_run) - 1U);
-            memset(bt_resp, 0, sizeof(bt_resp));
-            HAL_UART_Receive(s_bt.huart, bt_resp, sizeof(bt_resp) - 1U, BT_RX_TIMEOUT_MS);
-            if (strstr((char *)bt_resp, "00") != NULL) {
-                Log_Print("BT", "SensoresM arrancado (00).");
-            } else {
-                Log_Printf("BT", "ERROR: AT+RUN no respondio 00: %s", (char *)bt_resp);
-            }
+            Log_Print("BT", "AT+RUN \"SensoresM\" enviado (no responde nada, no se espera ACK).");
         }
-    }
-    HAL_Delay(INIT_STEP_DELAY_MS);
-#endif
-
-#if INIT_LORA_ENABLE
-    Log_Blank();
-    Lora_Init(&s_lora);   /* ya imprime "Iniciando modulo LoRa..." internamente */
-
-    Log_Print("LORA", "Mandando ATQ...");
-    Lora_ResetRx(&s_lora);
-    static const uint8_t lora_cmd_atq[] = "ATQ\r\n";
-    Lora_Transmit(&s_lora, lora_cmd_atq, sizeof(lora_cmd_atq) - 1U);
-    HAL_Delay(600U);
-
-    if ((s_lora.rx_count > 0U) && (strstr((char *)s_lora.rx_buffer, "OK") != NULL)) {
-        Diagnostico.lora = true;
-        Log_Print("LORA", "Comunicacion exitosa, se recibio OK.");
-    } else {
-        Log_Print("LORA", "ERROR: no se recibio OK — revisar USART2/modulo.");
-    }
-    HAL_Delay(INIT_STEP_DELAY_MS);
-#endif
-
-#if INIT_RX_IR_ENABLE
-    Log_Blank();
-    Log_Print("RX_IR", "Inicializando receptor IR (EXTI+DWT)...");
-    IR_Init(&ir_handle);
-    Diagnostico.rx_ir = true;   /* Solo init — sin transmisor externo no hay forma de autoverificar */
-    Log_Print("RX_IR", "Receptor IR listo — no se hace poll aqui, requiere un transmisor externo disparando.");
-    HAL_Delay(INIT_STEP_DELAY_MS);
-#endif
-
-#if INIT_RGB_ENABLE
-    Log_Blank();
-    Log_Print("RGB", "Probando arcoiris...");
-    for (uint8_t i = 0U; i < INIT_RAINBOW_COLOR_COUNT; i++) {
-        const InitRgbColor_t *c = &s_rainbow[i];
-        for (uint8_t j = 0U; j < 3U; j++) {
-            LP55231_SetChannelPWM(&rgb, rgb_red_ch[j],   c->r ? 0xFFU : 0x00U);
-            LP55231_SetChannelPWM(&rgb, rgb_green_ch[j], c->g ? 0xFFU : 0x00U);
-            LP55231_SetChannelPWM(&rgb, rgb_blue_ch[j],  c->b ? 0xFFU : 0x00U);
-        }
-        HAL_Delay(INIT_RAINBOW_STEP_MS);
-    }
-    for (uint8_t ch = 0U; ch < LP55231_NUM_CHANNELS; ch++) {
-        LP55231_SetChannelPWM(&rgb, ch, 0x00U);
-    }
-    Diagnostico.rgb = true;
-    Log_Print("RGB", "Prueba de arcoiris terminada.");
-    HAL_Delay(INIT_STEP_DELAY_MS);
-#endif
-
-#if INIT_GPS_ENABLE
-    Log_Blank();
-    Log_Print("GPS", "Inicializando GPS (L86-M33/L76-L)...");
-    Gps_Init(&s_gps);
-    HAL_Delay(200U);
-    Gps_SendMTK(&s_gps, GPS_OUTPUT_RMC_GGA);
-    Gps_SendMTK(&s_gps, GPS_FIX_0_5HZ);
-    Log_Print("GPS", "Configurado (RMC+GGA a 0.5Hz, cada 2s). Esperando tramas...");
-
-    /* No exigimos fix (dificil en interiores) — solo confirmamos que estan
-     * llegando bytes reales del modulo, imprimiendo un par de tramas NMEA
-     * crudas tal como llegan. */
-    uint32_t gps_wait_start    = HAL_GetTick();
-    uint8_t  gps_lines_printed = 0U;
-    while (((HAL_GetTick() - gps_wait_start) < INIT_GPS_WAIT_MS) && (gps_lines_printed < 2U)) {
-        if (s_gps.sentence_ready) {
-            Log_Printf("GPS-RAW", "%s", s_gps.sentence);
-            gps_lines_printed++;
-        }
-        Gps_Process(&s_gps);
-    }
-
-    if (gps_lines_printed == 0U) {
-        Log_Print("GPS", "ERROR: no se recibio ninguna trama NMEA — revisar USART1/modulo.");
-    } else {
-        Diagnostico.gps = true;
-        Log_Print("GPS", "Comunicacion confirmada.");
     }
     HAL_Delay(INIT_STEP_DELAY_MS);
 #endif
@@ -614,17 +633,8 @@ void Inicializacion_Run(void) {
 #if INIT_RGB_ENABLE
     /* Cierre del init: parpadeo en verde de los 3 pares fisicos a la vez
      * (D1/D3/D5), a diferencia del parpadeo de bootloader que solo usa un
-     * par (D1). */
-    for (uint8_t i = 0U; i < INIT_LED_BLINK_COUNT; i++) {
-        for (uint8_t j = 0U; j < 3U; j++) {
-            LP55231_SetChannelPWM(&rgb, rgb_green_ch[j], 0xFFU);
-        }
-        HAL_Delay(INIT_LED_BLINK_MS);
-        for (uint8_t j = 0U; j < 3U; j++) {
-            LP55231_SetChannelPWM(&rgb, rgb_green_ch[j], 0x00U);
-        }
-        HAL_Delay(INIT_LED_BLINK_MS);
-    }
+     * par (D1). Ver Secuencia_Leds.h. */
+    Leds_ParpadeoFinInit();
 #endif
 }
 
@@ -723,6 +733,14 @@ void Inicializacion_PrintExerciseData(void) {
     Log_Printf("EXERCISE", "Tiempo: %lu", (unsigned long)g_exercise_data.tiempo);
     Log_Printf("EXERCISE", "MAC1: %s", g_exercise_data.mac);
     Log_Printf("EXERCISE", "MAC2: %s", g_exercise_data.mac2);
+    Log_Printf("EXERCISE", "Bateria chaleco/apuntador: %u%%/%u%%",
+               g_exercise_data.bateria_ch, g_exercise_data.bateria_ap);
+    Log_Printf("EXERCISE", "Lat/Lon/Alt: %.5f/%.5f/%.1f",
+               g_exercise_data.latitud, g_exercise_data.longitud, g_exercise_data.altitud);
+    Log_Printf("EXERCISE", "Orientacion/Pasos: %u/%u",
+               g_exercise_data.orientacion, g_exercise_data.pasos);
+    Log_Printf("EXERCISE", "ACK: %u  Timestamp: %lu",
+               g_exercise_data.ack, (unsigned long)g_exercise_data.timestamp);
     Log_Print("EXERCISE", "-----------------------------");
 #endif
 }
@@ -730,7 +748,7 @@ void Inicializacion_PrintExerciseData(void) {
 void Inicializacion_PrintSensorsData(void) {
 #if INIT_USB_LOGGER_ENABLE
     Log_Print("SENSORS", "---- Lecturas de sensores ----");
-    Log_Printf("SENSORS", "Bateria: %u%%", g_exercise_data.lvBatery);
+    Log_Printf("SENSORS", "Bateria (chaleco): %u%%", g_exercise_data.bateria_ch);
     Log_Printf("SENSORS", "Lux: %.1f", g_exercise_data.lux);
     Log_Printf("SENSORS", "Mag(uT): %.1f,%.1f,%.1f",
                g_exercise_data.mag_x_uT, g_exercise_data.mag_y_uT, g_exercise_data.mag_z_uT);
@@ -799,6 +817,20 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
  *         que vimos con el GPS (el TTL si veia tramas limpias en el pin,
  *         pero el MCU nunca capturaba nada). Limpiamos las banderas de
  *         error y re-armamos la recepcion de 1 byte.
+ * @note   GPS y LoRa usan esta recepcion IT SOLO durante el bring-up (antes
+ *         del RTOS) — en produccion, GpsTask/LoraTask cambian a DMA
+ *         circular, que no necesita (ni debe) rearmarse con
+ *         HAL_UART_Receive_IT(): eso arma recepcion por interrupcion
+ *         ENCIMA del DMA activo y lo rompe en silencio (bug real,
+ *         encontrado 2026-09 probando LoRa: el DMA reportaba HAL_OK al
+ *         arrancar, pero cualquier error de framing/ruido en la linea
+ *         despues de que LoraTask tomo el control lo dejaba sordo para
+ *         siempre, sin ningun aviso). Por eso el re-armado aqui se
+ *         condiciona a g_gps_dma_activo/g_lora_dma_activo (definidas en
+ *         Tareas.c, en false hasta que GpsTask/LoraTask arman su DMA) —
+ *         mientras siga en bring-up SI hace falta re-armar IT, en cuanto
+ *         el DMA toma el control ya no. Bluetooth si sigue re-armando IT
+ *         siempre porque BluetoothTask usa IT para siempre, nunca DMA.
  */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
 #if INIT_GPS_ENABLE
@@ -806,7 +838,9 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
         __HAL_UART_CLEAR_OREFLAG(huart);
         __HAL_UART_CLEAR_FEFLAG(huart);
         __HAL_UART_CLEAR_NEFLAG(huart);
-        HAL_UART_Receive_IT(huart, &s_gps.rx_byte, 1U);
+        if (!g_gps_dma_activo) {
+            HAL_UART_Receive_IT(huart, &s_gps.rx_byte, 1U);
+        }
         return;
     }
 #endif
@@ -815,7 +849,9 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
         __HAL_UART_CLEAR_OREFLAG(huart);
         __HAL_UART_CLEAR_FEFLAG(huart);
         __HAL_UART_CLEAR_NEFLAG(huart);
-        HAL_UART_Receive_IT(huart, &s_lora.rx_byte, 1U);
+        if (!g_lora_dma_activo) {
+            HAL_UART_Receive_IT(huart, &s_lora.rx_byte, 1U);
+        }
         return;
     }
 #endif

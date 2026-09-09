@@ -21,6 +21,7 @@ extern "C" {
 #endif
 
 #include "stm32l4xx_hal.h"
+#include "Inicializacion.h"   /* ExerciseGameData_t — destino de Lora_ParseDatos()/Lora_ParseHexDatos() */
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -41,6 +42,13 @@ extern "C" {
 
 #define LORA_TX_BUFFER_SIZE     256U    /**< Max transmit payload bytes      */
 #define LORA_RX_BUFFER_SIZE     256U    /**< Max receive payload bytes       */
+
+/* Configuracion inicial con el gateway (modulo KG200Z, comandos AT tipo
+ * Quectel — ver CODIGO_LORA/ para el codigo de referencia original). Todo
+ * esto corre en Inicializacion_Run(), bloqueante, antes del RTOS. */
+#define LORA_CMD_TIMEOUT_MS      200U   /**< Timeout de respuesta a un AT+QXXX comun */
+#define LORA_JOIN_TIMEOUT_MS   15000U   /**< Timeout esperando "JOINED" tras AT+QJOIN=1 */
+#define LORA_CSV_FIELD_COUNT      9U    /**< numOrden,ID,equipo,alias,vidas,municion,tiempo,mac1,mac2 */
 
 /* ========================  ENUMERATIONS  ================================== */
 
@@ -66,6 +74,11 @@ typedef struct {
     uint16_t            rx_count;       /**< Bytes accumulated in rx_buffer  */
     uint8_t             rx_byte;        /**< Last byte from UART interrupt   */
     bool                rx_ready;       /**< true when data is available     */
+
+    /* Contadores del cierre "***"/"2A2A2A" — ver Lora_StoreBytes(). Se
+     * reinician en '$' y cada vez que aparece algo que rompe la racha. */
+    uint8_t             star_raw_streak;   /**< '*' crudos consecutivos vistos       */
+    uint8_t             star_hex_streak;   /**< pares "2A"/"2a" alineados consecutivos */
 } Lora_Handle_t;
 
 /* ================================  API  =================================== */
@@ -106,6 +119,46 @@ void Lora_StoreByte(Lora_Handle_t *h);
 void Lora_ResetRx(Lora_Handle_t *h);
 
 /**
+ * @brief  Acumula un bloque completo de bytes (modo DMA) reconociendo el
+ *         framing $...*** de LoRa (cierre triple, no un solo '*' — ver
+ *         nota de ruido abajo). Dos formas de recibirlo, ambas soportadas:
+ *         (1) $ y * como bytes crudos (pruebas armadas a mano) — reinicia
+ *         el buffer en '$', marca rx_ready al ver 3 '*' crudos seguidos;
+ *         (2) TODO codificado en hex, incluido el $ y el * (asi manda
+ *         ChirpStack de verdad) — en ese caso $ y * nunca llegan como
+ *         bytes crudos, llegan como texto "24"/"2A". Por eso tambien se revisa,
+ *         cada vez que se completa un PAR alineado de caracteres hex, si
+ *         es "2A"/"2a" — al ver 3 pares seguidos se marca el cierre igual,
+ *         y esos 6 caracteres se recortan del buffer para que no
+ *         contaminen el ultimo campo real al decodificar.
+ *         No hace falta detectar el "24" de apertura: LoraTask decodifica
+ *         todo y busca "CONF" con strstr(), que lo encuentra este donde
+ *         este en el texto decodificado.
+ *         Por que triple y no uno solo: esto viaja por RF real (LoRa), un
+ *         solo bit corrupto en transito podria formar un "2A"/'*' falso a
+ *         mitad del payload y cerrar el frame antes de tiempo — exigir 3
+ *         seguidos hace esa coincidencia practicamente imposible por ruido.
+ *         A diferencia de Bt_StoreByte()/Gps_StoreBytes() (que cierran en
+ *         '\r'), aqui NO se puede depender de un '\r' incidental: en
+ *         produccion nadie "da Enter", el emisor tiene que poner '***' (o
+ *         su forma hex "2A2A2A") a proposito al final del payload. Llamar
+ *         desde HAL_UARTEx_RxEventCallback.
+ * @param  h     Pointer to the LoRa handle.
+ * @param  data  Buffer con los bytes recibidos.
+ * @param  len   Cuantos bytes hay en data.
+ */
+void Lora_StoreBytes(Lora_Handle_t *h, const uint8_t *data, uint16_t len);
+
+/**
+ * @brief  Codifica bytes crudos a texto hexadecimal ASCII ("41421A...").
+ *         Equivalente a codificarJsonToHex() del codigo de referencia.
+ * @param  data      Bytes a codificar.
+ * @param  data_len  Cuantos bytes hay en data.
+ * @param  out       Buffer de salida, debe medir al menos (data_len*2 + 1).
+ */
+void Lora_EncodeToHex(const uint8_t *data, size_t data_len, char *out);
+
+/**
  * @brief  Sends the sleep AT command to the RM1262 module.
  * @param  h  Pointer to the LoRa handle.
  * @note   Primary command: AT+SLEEP. Wake up by sending any byte on UART.
@@ -121,6 +174,61 @@ LoraStatus_e Lora_Sleep(Lora_Handle_t *h);
  *         returning. Call before any transmit or receive operation.
  */
 LoraStatus_e Lora_WakeUp(Lora_Handle_t *h);
+
+/* ==================  CONFIGURACION CON EL GATEWAY (KG200Z)  =============== */
+
+/**
+ * @brief  Configura el modulo (region US915, subbanda 2, clase A, ADR,
+ *         low-power) — equivalente a setupLoRa() del codigo de referencia
+ *         (ver CODIGO_LORA/lora_kg200z.c). Bloqueante, solo se llama una
+ *         vez en Inicializacion_Run(), antes del RTOS.
+ * @param  h  Pointer to the LoRa handle (ya inicializado con Lora_Init()).
+ * @retval LORA_OK si el modulo responde y queda configurado, LORA_ERR_UART
+ *         si no responde a AT basico.
+ */
+LoraStatus_e Lora_Setup(Lora_Handle_t *h);
+
+/**
+ * @brief  Hace join a la red LoRaWAN (equivalente a connectLoRa()).
+ * @param  h  Pointer to the LoRa handle.
+ * @retval LORA_OK si el join se confirmo ("JOINED"), LORA_ERR_TIMEOUT si no.
+ */
+LoraStatus_e Lora_Connect(Lora_Handle_t *h);
+
+/**
+ * @brief  Decodifica una cadena hexadecimal ASCII ("41421A...") a bytes
+ *         crudos. Equivalente a decodeHexToBytes() del codigo de
+ *         referencia.
+ * @param  hex_str  Cadena hex, NUL-terminada (case-insensitive).
+ * @param  out      Buffer de salida.
+ * @param  max_len  Tamaño maximo de out.
+ * @retval Bytes decodificados en out.
+ */
+size_t Lora_DecodeHexToBytes(const char *hex_str, uint8_t *out, size_t max_len);
+
+/**
+ * @brief  Parsea un CSV de 9 campos ya decodificado (ASCII, no hex) —
+ *         "numOrden,ID,equipo,alias,vidas,municion,tiempo,mac1,mac2",
+ *         opcionalmente envuelto en `{...}` — y llena los campos
+ *         correspondientes de ExerciseGameData_t (mac1 -> out->mac,
+ *         mac2 -> out->mac2). Equivalente a parsearDatosLora().
+ * @param  csv_ascii  Texto CSV ya decodificado.
+ * @param  out        Estructura a llenar (normalmente &g_exercise_data).
+ * @retval true si se reconocieron los 9 campos, false si el formato no
+ *         coincide (out queda sin tocar en ese caso).
+ */
+bool Lora_ParseDatos(const char *csv_ascii, ExerciseGameData_t *out);
+
+/**
+ * @brief  Combina Lora_DecodeHexToBytes() + Lora_ParseDatos() en un solo
+ *         paso — util para inyectar tramas de prueba en hexadecimal
+ *         directo (ej. escribiendo a mano por terminal al UART de LoRa,
+ *         mientras no exista LoraTask real).
+ * @param  hex_str  Cadena hex ASCII recibida (ej. de s_lora.rx_buffer).
+ * @param  out      Estructura a llenar (normalmente &g_exercise_data).
+ * @retval true si se decodifico y parseo correctamente.
+ */
+bool Lora_ParseHexDatos(const char *hex_str, ExerciseGameData_t *out);
 
 #ifdef __cplusplus
 }
