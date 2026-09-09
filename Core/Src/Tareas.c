@@ -48,22 +48,40 @@ extern Ir_Handle_t ir_handle;
 #define LORA_DMA_BUF_SIZE    256U
 #define LORA_STALE_TIMEOUT_MS  5000U   /**< Si algo lleva abierto (sin '***'/"2A2A2A") mas de esto, se descarta solo */
 #define LORA_EXERCISE_PERIOD_MS 10000U /**< Cada cuanto se manda telemetria completa en MODO_EJERCICIO */
+#define TESTLORA_PERIOD_MS   30000U    /**< Cada cuanto se manda "TESTLORA" mientras estamos en MODO_CONFIGURACION */
+
+/* Tarjeta de pruebas aislada de LoRa (2026-09-09): solo trae el modulo LoRa
+ * y parte de la alimentacion, sin GPS ni sensores conectados — asi que
+ * GpsTask/SensorsTask van a estar tronando en cada lectura sin aportar
+ * nada util mientras se prueba el LoRa solo. En vez de una tarea aparte
+ * (que competiria por el mismo huart2 que ya usa LoraTask para telemetria),
+ * el envio periodico de "TESTLORA" se agrega dentro del loop de LoraTask —
+ * mismo criterio ya usado para la telemetria de MODO_EJERCICIO: un solo
+ * dueno del UART, sin mutex extra ni riesgo de dos tareas transmitiendo al
+ * mismo tiempo. Regresar ambas a 1U cuando la tarjeta final con todos los
+ * sensores este lista para probarse de nuevo. */
+#define TASK_GPS_ENABLE          0U
+#define TASK_SENSORS_ENABLE      0U
 
 /* ======================  STATIC VARIABLES  ================================ */
 
+#if TASK_GPS_ENABLE
 static osThreadId_t gpsTaskHandle;
 static const osThreadAttr_t gpsTask_attributes = {
     .name       = "GpsTask",
     .stack_size = 1024U * 4U,   /* 4KB */
     .priority   = (osPriority_t)osPriorityNormal,
 };
+#endif
 
+#if TASK_SENSORS_ENABLE
 static osThreadId_t sensorsTaskHandle;
 static const osThreadAttr_t sensorsTask_attributes = {
     .name       = "SensorsTask",
     .stack_size = 1024U * 4U,   /* 4KB — llamadas anidadas de HAL I2C (Begin/Init/ReadAll) */
     .priority   = (osPriority_t)osPriorityNormal,
 };
+#endif
 
 static osThreadId_t calibrateTaskHandle;
 static const osThreadAttr_t calibrateTask_attributes = {
@@ -149,21 +167,26 @@ static volatile bool        s_bt_conectado  = false;
  * LEDS_BT_DSCON_MS, LEDS_BT_DSCON_COUNT, LEDS_BT_ERROR_MS y
  * LEDS_BT_ERROR_COUNT en Secuencia_Leds.h */
 
+#if TASK_GPS_ENABLE
 /* Buffer circular del DMA y handle de GPS propios de esta tarea — separados
  * del handle que usa el smoke test de Inicializacion.c (ese ya cumplio su
  * proposito en el arranque, este es el que corre para siempre). */
 static uint8_t       s_gps_dma_buf[GPS_DMA_BUF_SIZE];
 static uint16_t      s_gps_dma_last_pos = 0U;
 static Gps_Handle_t  s_gps_task;
+#endif
 
+#if TASK_SENSORS_ENABLE
 /* Handles de sensores propios de SensorsTask — igual que GPS, separados de
  * los que usa el smoke test de Inicializacion.c. MMC5983MA no usa handle
  * propio (API a nivel de modulo, ver Inicializacion.c). */
 static TSL2571_t     s_light_task;
 static LSM6DSO32TR_t s_imu_task;
+#endif
 
 /* ======================  STATIC FUNCTIONS  ================================ */
 
+#if TASK_GPS_ENABLE
 /**
  * @brief  Tarea del GPS: recepcion por DMA circular + deteccion de linea
  *         IDLE (HAL_UARTEx_ReceiveToIdle_DMA) — ver Core/Doc, arquitectura
@@ -175,18 +198,6 @@ static LSM6DSO32TR_t s_imu_task;
 static void GpsTask(void *argument)
 {
     (void)argument;
-
-    /* Reporte de heap libre — primera linea de la primera tarea real que
-     * corre, ya con el scheduler vivo. NUNCA mover esto a antes de
-     * osKernelStart(). */
-    Log_Printf("RTOS", "Heap libre tras crear tareas: %u bytes (de %u)",
-               (unsigned)xPortGetFreeHeapSize(), (unsigned)configTOTAL_HEAP_SIZE);
-    Log_Printf("RTOS", "Handles: lora=%s sensors=%s calib=%s logger=%s bt=%s",
-               (loraTaskHandle       != NULL) ? "OK" : "NULL",
-               (sensorsTaskHandle    != NULL) ? "OK" : "NULL",
-               (calibrateTaskHandle  != NULL) ? "OK" : "NULL",
-               (loggerTaskHandle     != NULL) ? "OK" : "NULL",
-               (bluetoothTaskHandle  != NULL) ? "OK" : "NULL");
 
     /* El smoke test de Inicializacion.c dejo el UART armado en modo IT
      * (Gps_Init -> HAL_UART_Receive_IT, re-armado solo en cada byte). Lo
@@ -237,6 +248,7 @@ static void GpsTask(void *argument)
         osDelay(200U);
     }
 }
+#endif /* TASK_GPS_ENABLE */
 
 /**
  * @brief  Decodifica y despacha una linea ya cerrada (***) recibida por
@@ -353,6 +365,34 @@ static void Lora_EnviarTelemetria(void)
 }
 
 /**
+ * @brief  Manda "TESTLORA" cada TESTLORA_PERIOD_MS mientras estamos en
+ *         MODO_CONFIGURACION (nunca en MODO_EJERCICIO, ahi ya manda la
+ *         telemetria real cada LORA_EXERCISE_PERIOD_MS y no hace falta
+ *         duplicar transmisiones). Util para probar el modulo LoRa aislado
+ *         en la tarjeta de pruebas (sin GPS ni sensores, ver
+ *         TASK_GPS_ENABLE/TASK_SENSORS_ENABLE), confirmando en el gateway
+ *         que el enlace sigue vivo aunque nadie haya mandado $CONF todavia.
+ */
+static void Lora_EnviarTestLora(void)
+{
+    static const char testlora_msg[] = "TESTLORA";
+
+    char hex_payload[(sizeof(testlora_msg) * 2U) + 1U];
+    Lora_EncodeToHex((const uint8_t *)testlora_msg, sizeof(testlora_msg) - 1U, hex_payload);
+
+    char cmd[sizeof(hex_payload) + 16U];
+    int  cmd_len = snprintf(cmd, sizeof(cmd), "AT+QSEND=1:1:%s\r\n", hex_payload);
+    if (cmd_len <= 0 || (size_t)cmd_len >= sizeof(cmd)) {
+        Log_Print("LORA", "ERROR: comando AT+QSEND de TESTLORA demasiado grande.");
+        return;
+    }
+
+    Lora_ResetRx(&s_lora_task);
+    Lora_Transmit(&s_lora_task, (const uint8_t *)cmd, (uint16_t)cmd_len);
+    Log_Print("LORA", "TESTLORA enviado.");
+}
+
+/**
  * @brief  Tarea de LoRa: recepcion por DMA circular + linea IDLE (mismo
  *         patron que GpsTask), framing $...*** (ver Lora_StoreBytes() —
  *         ChirpStack manda TODO codificado en hex, incluido el $/*, asi
@@ -373,6 +413,18 @@ static void Lora_EnviarTelemetria(void)
 static void LoraTask(void *argument)
 {
     (void)argument;
+
+    /* Reporte de heap libre — primera linea de la primera tarea real que
+     * corre, ya con el scheduler vivo. NUNCA mover esto a antes de
+     * osKernelStart(). Vivia en GpsTask, se movio aqui porque GpsTask esta
+     * deshabilitada (TASK_GPS_ENABLE=0) mientras se prueba la tarjeta
+     * aislada de LoRa — LoraTask es ahora la primera tarea que arranca. */
+    Log_Printf("RTOS", "Heap libre tras crear tareas: %u bytes (de %u)",
+               (unsigned)xPortGetFreeHeapSize(), (unsigned)configTOTAL_HEAP_SIZE);
+    Log_Printf("RTOS", "Handles: calib=%s logger=%s bt=%s",
+               (calibrateTaskHandle  != NULL) ? "OK" : "NULL",
+               (loggerTaskHandle     != NULL) ? "OK" : "NULL",
+               (bluetoothTaskHandle  != NULL) ? "OK" : "NULL");
 
     Log_Print("LORA", "LoraTask arrancada, esperando $CONF...");
 
@@ -408,11 +460,23 @@ static void LoraTask(void *argument)
      * manda la telemetria completa — arranca al recibir $RUN (ver abajo). */
     uint32_t last_exercise_tx = 0U;
 
+    /* Cada TESTLORA_PERIOD_MS, mientras estemos en MODO_CONFIGURACION (antes
+     * de RUN), se manda "TESTLORA" — ver Lora_EnviarTestLora(). En cuanto
+     * entra MODO_EJERCICIO esto se detiene solo (la condicion de abajo deja
+     * de cumplirse) y la telemetria real de arriba toma el relevo. */
+    uint32_t last_testlora_tx = 0U;
+
     for (;;) {
         if ((g_modo_operacion == MODO_EJERCICIO) &&
             ((HAL_GetTick() - last_exercise_tx) >= LORA_EXERCISE_PERIOD_MS)) {
             last_exercise_tx = HAL_GetTick();
             Lora_EnviarTelemetria();
+        }
+
+        if ((g_modo_operacion == MODO_CONFIGURACION) &&
+            ((HAL_GetTick() - last_testlora_tx) >= TESTLORA_PERIOD_MS)) {
+            last_testlora_tx = HAL_GetTick();
+            Lora_EnviarTestLora();
         }
 
         if (s_lora_task.rx_ready) {
@@ -453,6 +517,7 @@ static void LoraTask(void *argument)
     }
 }
 
+#if TASK_SENSORS_ENABLE
 /**
  * @brief  Tarea de lectura de sensores: cada SENSORS_PERIOD_MS lee luz,
  *         bateria, IMU (giroscopio) y magnetometro por I2C1 (protegido con
@@ -537,6 +602,7 @@ static void SensorsTask(void *argument)
         osDelay(SENSORS_PERIOD_MS);
     }
 }
+#endif /* TASK_SENSORS_ENABLE */
 
 /**
  * @brief  Tarea de calibracion (disparo IR de prueba): cada CALIB_PERIOD_MS
@@ -984,9 +1050,13 @@ void Tareas_InicializarMutex(void)
 
 void Tareas_CrearTareas(void)
 {
+#if TASK_GPS_ENABLE
     gpsTaskHandle     = osThreadNew(GpsTask, NULL, &gpsTask_attributes);
+#endif
     loraTaskHandle    = osThreadNew(LoraTask, NULL, &loraTask_attributes);
+#if TASK_SENSORS_ENABLE
     sensorsTaskHandle = osThreadNew(SensorsTask, NULL, &sensorsTask_attributes);
+#endif
     calibrateTaskHandle = osThreadNew(CalibrateTask, NULL, &calibrateTask_attributes);
     loggerTaskHandle  = osThreadNew(Log_Task, NULL, &loggerTask_attributes);
     bluetoothTaskHandle = osThreadNew(BluetoothTask, NULL, &bluetoothTask_attributes);
@@ -1009,6 +1079,7 @@ void Tareas_CrearTareas(void)
  */
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
+#if TASK_GPS_ENABLE
     if (huart->Instance == GPS_UART->Instance) {
         if (Size >= s_gps_dma_last_pos) {
             Gps_StoreBytes(&s_gps_task, &s_gps_dma_buf[s_gps_dma_last_pos],
@@ -1022,6 +1093,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         s_gps_dma_last_pos = Size;
         return;
     }
+#endif
 
     if (huart->Instance == LORA_UART->Instance) {
         if (Size >= s_lora_dma_last_pos) {
