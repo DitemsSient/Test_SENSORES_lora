@@ -118,7 +118,7 @@ BtStatus_e Bt_SendAdvertise(Bt_Handle_t *h, const char *mac_ap)
     int  n = snprintf(cmd, sizeof(cmd), "$CON%s\r", mac_ap);
     if (n <= 0 || (size_t)n >= sizeof(cmd)) { return BT_ERR_PARAM; }
 
-    Log_Printf("BT", "Iniciando modo advertising ($CON%s)...", mac_ap);
+    Log_Printf("BT", "Tratando de conectar con: %s", mac_ap);
     Bt_ResetRx(h);
     return Bt_Transmit(h, (uint8_t *)cmd, (uint16_t)n);
 }

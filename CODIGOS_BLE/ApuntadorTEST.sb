@@ -1,5 +1,5 @@
 // ApuntadorTEST - Simulador de Mira para probar la tarjeta de Sensores con un kit
-// Muestra su MAC, anuncia 5s/descansa 8s (parpadeando LED SIO17) hasta conectar.
+// Muestra su MAC y se anuncia sin parar (advertising indefinido) hasta conectar.
 // Ya conectado, sigue el protocolo de aplicacion de la tabla Mira/Sensores:
 //   Sensores -> CONF<datos>   : lo guarda, lo imprime, responde ACKCONF
 //   Sensores -> RUN           : responde ACKRUN, arranca telemetria A_AP cada 10s
@@ -20,7 +20,6 @@ DIM hSvc
 DIM hCharRx
 DIM hCharTx
 DIM ntfyEnabled : ntfyEnabled = 0
-DIM ledState : ledState = 0
 DIM nAttributeMTU : nAttributeMTU = 23
 DIM nAttributeLength
 DIM nBleMaxPacketLength
@@ -53,8 +52,6 @@ DIM cfMac$      : cfMac$ = ""
 #define ATTRIBUTE_DATA_LENGTH_MAXIMUM   244
 #define BLE_MAX_PACKET_LENGTH           251
 
-#define ADV_ON_MS   5000
-#define ADV_OFF_MS  8000
 #define MSG_DELAY_MS 150
 #define AP_INTERVAL_MS 10000
 #define FIN_TIMEOUT_MS 120000
@@ -76,7 +73,6 @@ ENDFUNC 0
 PRINT "\n=== ApuntadorTEST arrancando ===\n"
 
 rc = ConfigurarDLE()
-rc = GpioSetFunc(17, 2, 0)
 BleVSpClose()
 
 // Mostrar MAC propia
@@ -99,15 +95,15 @@ rc = BleCharNew(0x12, BleHandleUuid16(2), BleAttrMetaData(1,0,244,0,rc), mdCccd,
 rc = BleCharCommit(hSvc, txAttr$, hCharTx)
 
 rc = BleServiceCommit(hSvc)
-PRINT "\nApuntadorTEST listo, iniciando ciclo de advertising\n"
+PRINT "\nApuntadorTEST listo, iniciando advertising\n"
 
+// Advertising indefinido (timeout=0), igual que Apuntador.sb en su forma - sin ciclos
 FUNCTION IniciarAdvertising()
     rc = BleAdvRptInit(adRpt$, 2, 0, 20)
     rc = BleAdvRptsCommit(adRpt$, scRpt$)
-    rc = BleAdvertStart(0, addr$, 100, ADV_ON_MS, 0)
+    rc = BleAdvertStart(0, addr$, 100, 0, 0)
     IF rc == 0 THEN
-        PRINT "\nAnunciando (5s)..."
-        TimerStart(1, 500, 1)
+        PRINT "\nAnunciando (sin limite de tiempo)..."
     ELSE
         PRINT "\nERROR BleAdvertStart rc="
         PRINT rc
@@ -115,32 +111,10 @@ FUNCTION IniciarAdvertising()
     ENDIF
 ENDFUNC 1
 
-// Parpadeo de LED mientras se anuncia
-FUNCTION HndlrTmr1()
-    ledState = !ledState
-    GpioWrite(17, ledState)
-ENDFUNC 1
-
-// Nadie se conecto en 5s -> apagar LED, descansar 8s
-FUNCTION HndlrAdvTimeout()
-    TimerCancel(1)
-    GpioWrite(17, 0)
-    PRINT "\nDescansando (8s)..."
-    TimerStart(2, ADV_OFF_MS, 0)
-ENDFUNC 1
-
-// Termino el descanso -> anunciar de nuevo
-FUNCTION HndlrTmr2()
-    rc = IniciarAdvertising()
-ENDFUNC 1
-
 FUNCTION HndlrBleMsg(BYVAL nMsgId AS INTEGER, BYVAL nCtx AS INTEGER)
     SELECT nMsgId
         CASE 0
             hConn = nCtx
-            TimerCancel(1)
-            TimerCancel(2)
-            GpioWrite(17, 0)
             ntfyEnabled = 0
             confRecibido = 0
             runRecibido = 0
@@ -157,10 +131,14 @@ FUNCTION HndlrBleMsg(BYVAL nMsgId AS INTEGER, BYVAL nCtx AS INTEGER)
             TimerCancel(6)
             TimerCancel(7)
             TimerCancel(0)
-            PRINT "\nDesconectado - reiniciando ciclo de anuncio"
+            PRINT "\nDesconectado - reanudando advertising"
             rc = IniciarAdvertising()
         CASE ELSE
     ENDSELECT
+ENDFUNC 1
+
+// Solo "atrapa" el evento de negociacion de MTU (lo pide el central al conectar)
+FUNCTION HndlrAttrMTU(BYVAL hC AS INTEGER, BYVAL nSize AS INTEGER)
 ENDFUNC 1
 
 FUNCTION HndlrCharCccd(BYVAL charHandle AS INTEGER, BYVAL nVal AS INTEGER)
@@ -322,11 +300,9 @@ ENDFUNC 1
 rc = IniciarAdvertising()
 
 ONEVENT EVBLEMSG           CALL HndlrBleMsg
-ONEVENT EVBLE_ADV_TIMEOUT  CALL HndlrAdvTimeout
+ONEVENT EVATTRIBUTEMTU     CALL HndlrAttrMTU
 ONEVENT EVCHARCCCD         CALL HndlrCharCccd
 ONEVENT EVCHARVALUE        CALL HndlrCharValue
-ONEVENT EVTMR1             CALL HndlrTmr1
-ONEVENT EVTMR2             CALL HndlrTmr2
 ONEVENT EVTMR3             CALL HndlrTmr3
 ONEVENT EVTMR4             CALL HndlrTmr4
 ONEVENT EVTMR5             CALL HndlrTmr5
