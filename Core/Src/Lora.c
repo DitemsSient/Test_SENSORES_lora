@@ -189,11 +189,14 @@ void Lora_ResetRx(Lora_Handle_t *h)
         return;
     }
 
-    h->rx_count        = 0U;
-    h->rx_ready        = false;
-    h->star_raw_streak = 0U;
-    h->star_hex_streak = 0U;
+    h->rx_count = 0U;
+    h->rx_ready = false;
     memset(h->rx_buffer, 0, LORA_RX_BUFFER_SIZE);
+
+    h->line_len_cur      = 0U;
+    h->line_queue_head    = 0U;
+    h->line_queue_tail    = 0U;
+    h->line_queue_count   = 0U;
 }
 
 void Lora_StoreBytes(Lora_Handle_t *h, const uint8_t *data, uint16_t len)
@@ -203,61 +206,46 @@ void Lora_StoreBytes(Lora_Handle_t *h, const uint8_t *data, uint16_t len)
     for (uint16_t i = 0U; i < len; i++) {
         char c = (char)data[i];
 
-        if (c == '$') {
-            /* $ crudo — caso en que alguien arma el frame a mano, sin pasar
-             * todo por hex (ej. pruebas directas por terminal). */
-            h->rx_count        = 0U;
-            h->rx_ready        = false;
-            h->rx_buffer[0]    = '\0';
-            h->star_raw_streak = 0U;
-            h->star_hex_streak = 0U;
-            continue;
-        }
-        if (c == '*') {
-            /* * crudo — cuenta la racha, cierra al tercero seguido (ver
-             * comentario de "por que triple" en Lora.h). */
-            h->star_raw_streak++;
-            if ((h->star_raw_streak >= 3U) && (h->rx_count > 0U)) {
-                h->rx_ready = true;
+        if (c == '\n') {
+            /* Recorta el '\r' final si vino (protocolo de lineas AT tipico,
+             * "\r\n"). */
+            if ((h->line_len_cur > 0U) &&
+                (h->line_queue[h->line_queue_head][h->line_len_cur - 1U] == '\r')) {
+                h->line_len_cur--;
             }
-            continue;
-        }
-        h->star_raw_streak = 0U;   /* cualquier otro byte rompe la racha de '*' crudos */
+            h->line_queue[h->line_queue_head][h->line_len_cur] = '\0';
 
-        if (h->rx_count < (LORA_RX_BUFFER_SIZE - 1U)) {
-            h->rx_buffer[h->rx_count] = (uint8_t)c;
-            h->rx_count++;
-            h->rx_buffer[h->rx_count] = '\0';
-        }
-
-        /* ChirpStack manda TODO codificado en hex, incluyendo el $ y el *
-         * propios del mensaje — nunca llegan como bytes crudos en ese caso,
-         * llegan como los caracteres de texto "24" y "2A". Por eso ademas
-         * revisamos: cada vez que se completa un PAR alineado de caracteres
-         * hex (posiciones 0-1, 2-3, 4-5..., nunca a la mitad de un par —
-         * si no, un "2A" que cae a caballo entre dos bytes distintos daria
-         * un cierre falso), si ese par es "2A"/"2a" cuenta para la racha;
-         * al tercer par seguido se cierra el frame Y se recortan esos 6
-         * caracteres del buffer, para que el "***" codificado no quede
-         * pegado al ultimo campo real al decodificar. No hace falta buscar
-         * el "24" de apertura — el contenido decodificado se busca con
-         * strstr("CONF", ...) en LoraTask, que encuentra la palabra este
-         * donde este. */
-        if ((h->rx_count >= 2U) && ((h->rx_count % 2U) == 0U)) {
-            char par_hi = (char)h->rx_buffer[h->rx_count - 2U];
-            char par_lo = (char)h->rx_buffer[h->rx_count - 1U];
-            if (par_hi == '2' && (par_lo == 'A' || par_lo == 'a')) {
-                h->star_hex_streak++;
-                if (h->star_hex_streak >= 3U) {
-                    h->rx_count      -= 6U;   /* quita los 3 pares "2A" del cierre */
-                    h->rx_buffer[h->rx_count] = '\0';
-                    h->rx_ready = true;
+            if (h->line_len_cur > 0U) {   /* descarta lineas vacias ("\r\n" solo) */
+                if (h->line_queue_count < LORA_LINE_QUEUE_DEPTH) {
+                    h->line_queue_head = (uint8_t)((h->line_queue_head + 1U) % LORA_LINE_QUEUE_DEPTH);
+                    h->line_queue_count++;
                 }
-            } else {
-                h->star_hex_streak = 0U;
+                /* Cola llena: se descarta esta linea (el siguiente byte
+                 * reusa el mismo slot) — mejor perder una linea de bajo
+                 * interes que trabarse esperando a que LoraTask consuma. */
             }
+            h->line_len_cur = 0U;
+            continue;
+        }
+
+        if (h->line_len_cur < (LORA_LINE_MAX_LEN - 1U)) {
+            h->line_queue[h->line_queue_head][h->line_len_cur] = c;
+            h->line_len_cur++;
         }
     }
+}
+
+bool Lora_PopLine(Lora_Handle_t *h, char *out, size_t out_size)
+{
+    if (h == NULL || out == NULL || out_size == 0U) return false;
+    if (h->line_queue_count == 0U) return false;
+
+    strncpy(out, h->line_queue[h->line_queue_tail], out_size - 1U);
+    out[out_size - 1U] = '\0';
+
+    h->line_queue_tail = (uint8_t)((h->line_queue_tail + 1U) % LORA_LINE_QUEUE_DEPTH);
+    h->line_queue_count--;
+    return true;
 }
 
 void Lora_EncodeToHex(const uint8_t *data, size_t data_len, char *out)

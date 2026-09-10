@@ -62,6 +62,22 @@ extern "C" {
 #define LORA_ATQ_RETRIES           3U
 #define LORA_RESET_SETTLE_MS     500U   /**< Espera tras AT+QRFS (reset de fabrica) antes de reconfigurar */
 
+/* Recepcion por lineas (modo DMA, LoraTask) — ver Lora_StoreBytes()/
+ * Lora_PopLine(). Confirmado con hardware real 2026-09-09: el modulo NO
+ * manda un solo mensaje $...*** limpio por el UART como se asumia
+ * originalmente. Lo que en verdad llega es el protocolo de lineas AT del
+ * propio KG200Z (cada respuesta/evento terminado en "\r\n"), y el payload
+ * real del gateway viaja ADENTRO de una de esas lineas, envuelto como
+ * "+QEVT:<puerto>:<lenHex>:<payloadHex>" — mezclado en el mismo bloque de
+ * DMA con el eco de nuestros propios comandos ("AT+QSEND=...", "OK",
+ * "+QEVT:SEND_CONFIRMED"). LORA_LINE_MAX_LEN es cuanto puede medir una
+ * sola linea; LORA_LINE_QUEUE_DEPTH cuantas lineas completas se pueden
+ * encolar sin que LoraTask las consuma (el modulo puede mandar varias de
+ * un jalon, ej. "OK\r\n+QEVT:SEND_CONFIRMED\r\n+QEVT:1:3E:...\r\n" todo en
+ * un solo evento de DMA). */
+#define LORA_LINE_MAX_LEN        160U
+#define LORA_LINE_QUEUE_DEPTH      4U
+
 /* ========================  ENUMERATIONS  ================================== */
 
 /* Driver status / error codes */
@@ -87,10 +103,17 @@ typedef struct {
     uint8_t             rx_byte;        /**< Last byte from UART interrupt   */
     bool                rx_ready;       /**< true when data is available     */
 
-    /* Contadores del cierre "***"/"2A2A2A" — ver Lora_StoreBytes(). Se
-     * reinician en '$' y cada vez que aparece algo que rompe la racha. */
-    uint8_t             star_raw_streak;   /**< '*' crudos consecutivos vistos       */
-    uint8_t             star_hex_streak;   /**< pares "2A"/"2a" alineados consecutivos */
+    /* Cola de lineas AT completas (terminadas en '\n', sin el '\r' final)
+     * armada por Lora_StoreBytes() en modo DMA — ver comentario de
+     * LORA_LINE_QUEUE_DEPTH arriba. line_len_cur es cuanto lleva
+     * acumulado la linea EN PROGRESO (todavia sin su '\n' de cierre);
+     * line_queue_head/tail/count manejan las lineas YA cerradas, listas
+     * para que LoraTask las saque con Lora_PopLine(). */
+    char                line_queue[LORA_LINE_QUEUE_DEPTH][LORA_LINE_MAX_LEN];
+    uint16_t            line_len_cur;
+    uint8_t             line_queue_head;
+    uint8_t             line_queue_tail;
+    uint8_t             line_queue_count;
 } Lora_Handle_t;
 
 /* ================================  API  =================================== */
@@ -131,35 +154,43 @@ void Lora_StoreByte(Lora_Handle_t *h);
 void Lora_ResetRx(Lora_Handle_t *h);
 
 /**
- * @brief  Acumula un bloque completo de bytes (modo DMA) reconociendo el
- *         framing $...*** de LoRa (cierre triple, no un solo '*' — ver
- *         nota de ruido abajo). Dos formas de recibirlo, ambas soportadas:
- *         (1) $ y * como bytes crudos (pruebas armadas a mano) — reinicia
- *         el buffer en '$', marca rx_ready al ver 3 '*' crudos seguidos;
- *         (2) TODO codificado en hex, incluido el $ y el * (asi manda
- *         ChirpStack de verdad) — en ese caso $ y * nunca llegan como
- *         bytes crudos, llegan como texto "24"/"2A". Por eso tambien se revisa,
- *         cada vez que se completa un PAR alineado de caracteres hex, si
- *         es "2A"/"2a" — al ver 3 pares seguidos se marca el cierre igual,
- *         y esos 6 caracteres se recortan del buffer para que no
- *         contaminen el ultimo campo real al decodificar.
- *         No hace falta detectar el "24" de apertura: LoraTask decodifica
- *         todo y busca "CONF" con strstr(), que lo encuentra este donde
- *         este en el texto decodificado.
- *         Por que triple y no uno solo: esto viaja por RF real (LoRa), un
- *         solo bit corrupto en transito podria formar un "2A"/'*' falso a
- *         mitad del payload y cerrar el frame antes de tiempo — exigir 3
- *         seguidos hace esa coincidencia practicamente imposible por ruido.
- *         A diferencia de Bt_StoreByte()/Gps_StoreBytes() (que cierran en
- *         '\r'), aqui NO se puede depender de un '\r' incidental: en
- *         produccion nadie "da Enter", el emisor tiene que poner '***' (o
- *         su forma hex "2A2A2A") a proposito al final del payload. Llamar
- *         desde HAL_UARTEx_RxEventCallback.
+ * @brief  Acumula un bloque completo de bytes (modo DMA) partiendolo en
+ *         lineas — cierra cada linea en '\n' (recortando el '\r' final si
+ *         vino, protocolo AT tipico), descarta lineas vacias, y encola
+ *         cada linea completa en el handle (ver LORA_LINE_QUEUE_DEPTH en
+ *         Lora.h) para que LoraTask las saque con Lora_PopLine().
+ *         El modulo puede mandar VARIAS lineas juntas en un solo bloque de
+ *         DMA (ej. "OK\r\n+QEVT:SEND_CONFIRMED\r\n+QEVT:1:3E:...\r\n" de un
+ *         jalon) — por eso hace falta una cola y no solo un rx_ready/
+ *         rx_buffer: con un solo buffer, la 2da y 3ra linea del bloque se
+ *         perdian silenciosamente si LoraTask no alcanzaba a consumir
+ *         entre una y otra (bug real, confirmado con hardware 2026-09-09:
+ *         el payload real del gateway, que siempre viene en la ULTIMA
+ *         linea "+QEVT:...", se veia truncado/mezclado con el eco de
+ *         nuestro propio AT+QSEND).
+ *         El framing $...*** de LoRa (que SI se sigue usando) ya no vive
+ *         aqui — vive DENTRO del payload de una linea "+QEVT:", que
+ *         LoraTask decodifica de hex por separado (ver Lora_ProcesarLinea()
+ *         en Tareas.c). Llamar desde HAL_UARTEx_RxEventCallback.
  * @param  h     Pointer to the LoRa handle.
  * @param  data  Buffer con los bytes recibidos.
  * @param  len   Cuantos bytes hay en data.
  */
 void Lora_StoreBytes(Lora_Handle_t *h, const uint8_t *data, uint16_t len);
+
+/**
+ * @brief  Saca la linea mas vieja de la cola armada por Lora_StoreBytes(),
+ *         si hay alguna. Llamar en un while() para drenar TODAS las
+ *         lineas pendientes en cada vuelta del loop de LoraTask, no solo
+ *         una — el modulo puede haber mandado varias juntas (ver
+ *         Lora_StoreBytes()).
+ * @param  h         Pointer to the LoRa handle.
+ * @param  out       Buffer de salida, NUL-terminado al regresar true.
+ * @param  out_size  Tamaño de out (incluye el NUL).
+ * @retval true si habia una linea y se copio a out, false si la cola
+ *         estaba vacia (out queda sin tocar en ese caso).
+ */
+bool Lora_PopLine(Lora_Handle_t *h, char *out, size_t out_size);
 
 /**
  * @brief  Codifica bytes crudos a texto hexadecimal ASCII ("41421A...").

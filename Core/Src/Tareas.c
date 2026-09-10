@@ -46,7 +46,6 @@ extern Ir_Handle_t ir_handle;
 #define CALIB_VALID_WORD  0xAA55U
 
 #define LORA_DMA_BUF_SIZE    256U
-#define LORA_STALE_TIMEOUT_MS  5000U   /**< Si algo lleva abierto (sin '***'/"2A2A2A") mas de esto, se descarta solo */
 #define LORA_EXERCISE_PERIOD_MS 10000U /**< Cada cuanto se manda telemetria completa en MODO_EJERCICIO */
 #define TESTLORA_PERIOD_MS   30000U    /**< Cada cuanto se manda "TESTLORA" mientras estamos en MODO_CONFIGURACION */
 
@@ -251,31 +250,48 @@ static void GpsTask(void *argument)
 #endif /* TASK_GPS_ENABLE */
 
 /**
- * @brief  Decodifica y despacha una linea ya cerrada (***) recibida por
- *         LoRa: CONF/RUN/END_S/END, mismo criterio que antes (decodificar
- *         TODO primero, nunca adivinar si es hex o texto plano). Funcion
- *         propia (no solo inline en el loop de LoraTask) porque
- *         Lora_EnviarTelemetria() ya no espera nada tras transmitir, asi
- *         que el unico lugar que la llama por ahora es el loop principal —
- *         se deja separada de todos modos por si en el futuro hace falta
- *         reusarla en otro punto de recepcion.
- * @param  line      Buffer NUL-terminado con la linea cruda (hex ASCII).
- * @param  line_len  Bytes en line, solo para el log de depuracion.
+ * @brief  Procesa UNA linea AT completa que ya saco Lora_PopLine() de la
+ *         cola (terminada en '\n' originalmente, ya sin el '\r'/'\n').
+ *         Confirmado con hardware real 2026-09-09: el modulo NO manda el
+ *         mensaje $...*** limpio y solo por el UART — manda su propio
+ *         protocolo de lineas AT (ecos de comandos, "OK", eventos), y el
+ *         payload real del gateway viaja adentro de una linea con forma
+ *         "+QEVT:<puerto>:<lenHex>:<payloadHex>" (confirmado viendo un
+ *         downlink real: "+QEVT:1:3E:24434F4E..."). Todo lo demas que
+ *         manda el modulo (eco de nuestros propios AT+QXXX, "OK",
+ *         "+QEVT:SEND_CONFIRMED" de nuestros propios uplinks, etc.) no
+ *         trae datos del gateway — se loguea para depurar y ya, no hay
+ *         nada que decodificar ahi.
+ * @param  line  Buffer NUL-terminado con la linea AT ya recibida.
  */
-static void Lora_ProcesarLinea(const char *line, uint16_t line_len)
+static void Lora_ProcesarLinea(const char *line)
 {
-    Log_Printf("LORA", "[PRUEBA] Linea completa (%u bytes): %s", line_len, line);
+    Log_Printf("LORA", "[PRUEBA] Linea RX: %s", line);
 
-    /* ChirpStack/el gateway SIEMPRE manda el payload codificado en
-     * hex, incluyendo la palabra CONF — nunca llega en texto plano
-     * de verdad. Por eso la regla es fija: decodificar TODO primero,
-     * y ya sobre el resultado decodificado buscar "CONF". Ya no se
-     * adivina "es hex o es texto plano" mirando si hay comas. */
+    if (strncmp(line, "+QEVT:", 6U) != 0) {
+        return;   /* eco de comando, "OK", "+QEVT:SEND_CONFIRMED", etc. — nada que hacer */
+    }
+
+    /* "+QEVT:<puerto>:<lenHex>:<payloadHex>" — se ignora el puerto y el
+     * largo, el payload es todo lo que sigue del 2do ':' hasta el final
+     * de la linea (mismo criterio que esperarDatoLora() del codigo de
+     * referencia, CODIGO_LORA/lora_kg200z.c). */
+    const char *p1 = strchr(line + 6, ':');
+    const char *p2 = (p1 != NULL) ? strchr(p1 + 1, ':') : NULL;
+    if (p2 == NULL) {
+        return;   /* "+QEVT:SEND_CONFIRMED" y similares no traen ":" — no es dato */
+    }
+    const char *payload_hex = p2 + 1;
+
+    /* El payload de la aplicacion (lo que manda quien controla el gateway,
+     * no el modulo) SIGUE usando nuestro protocolo $...*** — por eso se
+     * decodifica de hex y se busca CONF/RUN/END_S/END igual que antes,
+     * solo que ahora sobre el campo payload_hex en vez de la linea entera. */
     uint8_t decoded[300];
-    size_t  decoded_len = Lora_DecodeHexToBytes(line, decoded, sizeof(decoded) - 1U);
+    size_t  decoded_len = Lora_DecodeHexToBytes(payload_hex, decoded, sizeof(decoded) - 1U);
     decoded[decoded_len] = '\0';
     char *decoded_str = (char *)decoded;
-    Log_Printf("LORA", "[PRUEBA] Decodificado: %s", decoded_str);
+    Log_Printf("LORA", "[PRUEBA] Payload decodificado: %s", decoded_str);
 
     char *conf_pos  = strstr(decoded_str, "CONF");
     char *run_pos   = strstr(decoded_str, "RUN");
@@ -307,7 +323,7 @@ static void Lora_ProcesarLinea(const char *line, uint16_t line_len)
          * de momento solo se loguea, no se hace nada mas. */
         Log_Print("LORA", "END recibido — logica de fin de ejercicio pendiente de definir.");
     } else {
-        Log_Printf("LORA", "RX no reconocido (ni crudo ni decodificado trae CONF/RUN/END): %s", line);
+        Log_Printf("LORA", "Payload de +QEVT sin CONF/RUN/END reconocido: %s", decoded_str);
     }
 }
 
@@ -359,7 +375,6 @@ static void Lora_EnviarTelemetria(void)
         return;
     }
 
-    Lora_ResetRx(&s_lora_task);
     Lora_Transmit(&s_lora_task, (const uint8_t *)cmd, (uint16_t)cmd_len);
     Log_Printf("LORA", "Telemetria enviada: %s", csv);
 }
@@ -387,23 +402,24 @@ static void Lora_EnviarTestLora(void)
         return;
     }
 
-    Lora_ResetRx(&s_lora_task);
     Lora_Transmit(&s_lora_task, (const uint8_t *)cmd, (uint16_t)cmd_len);
     Log_Print("LORA", "TESTLORA enviado.");
 }
 
 /**
  * @brief  Tarea de LoRa: recepcion por DMA circular + linea IDLE (mismo
- *         patron que GpsTask), framing $...*** (ver Lora_StoreBytes() —
- *         ChirpStack manda TODO codificado en hex, incluido el $/*, asi
- *         que el cierre real que se busca es "2A2A2A" alineado en el
- *         texto, no bytes crudos).
- * @note   Al llegar una linea completa se decodifica TODO primero (nunca
- *         se adivina si es hex o texto plano) y sobre el resultado se
+ *         patron que GpsTask), partida en lineas AT por Lora_StoreBytes()
+ *         (ver su doc comment en Lora.h — el modulo manda su propio
+ *         protocolo de lineas, no un $...*** limpio, confirmado con
+ *         hardware real 2026-09-09).
+ * @note   Cada vuelta del loop se drenan TODAS las lineas pendientes con
+ *         Lora_PopLine() (puede haber varias juntas) y cada una se procesa
+ *         con Lora_ProcesarLinea(): solo las que empiezan con "+QEVT:"
+ *         traen datos, y ahi adentro se decodifica el payload de hex y se
  *         busca, en este orden: "CONF" -> Lora_ParseDatos() directo a
  *         g_exercise_data + marca s_lora_conf_listo (arranca BluetoothTask);
- *         "RUN" -> Modo_SetOperacion(MODO_EJERCICIO) y arranca el ciclo de
- *         telemetria cada LORA_EXERCISE_PERIOD_MS; "END" (cubre "END_S")
+ *         "RUN" -> avisa a BluetoothTask (s_lora_run_recibido); "END_S" ->
+ *         avisa a BluetoothTask (s_lora_end_s_recibido); "END" (a secas)
  *         -> TODO, logica de fin de ejercicio pendiente de definir.
  * @note   La telemetria de 12 campos (Lora_EnviarTelemetria()) se manda en
  *         dos casos: una vez cuando BluetoothTask marca
@@ -440,22 +456,6 @@ static void LoraTask(void *argument)
     HAL_UARTEx_ReceiveToIdle_DMA(LORA_UART, s_lora_dma_buf, LORA_DMA_BUF_SIZE);
     g_lora_dma_activo = true;   /* HAL_UART_ErrorCallback ya no debe re-armar IT */
 
-    /* [PRUEBA] Cuanto llevabamos impreso la ultima vez — para mostrar
-     * CUALQUIER cosa que se vaya acumulando en rx_buffer aunque nunca
-     * llegue el '\r' que cierra la linea (framing incompleto/erroneo).
-     * Momentaneo, mientras validamos que la recepcion si esta llegando —
-     * quitar cuando el protocolo este cerrado. */
-    uint16_t last_printed_count = 0U;
-
-    /* Bug real encontrado 2026-09: sin un '$' crudo (nunca llega asi,
-     * ChirpStack manda todo en hex) el buffer nunca se resetea solo — algo
-     * que se quedo a medias (basura, ruido, un mensaje cortado) se queda
-     * ahi para siempre esperando un cierre, y el proximo mensaje real se le
-     * pega encima en vez de empezar limpio. accum_start_tick marca cuando
-     * empezo a acumularse la linea actual; si pasa LORA_STALE_TIMEOUT_MS
-     * sin cerrar, se descarta sola sin esperar a que llegue nada nuevo. */
-    uint32_t accum_start_tick = 0U;
-
     /* Cada LORA_EXERCISE_PERIOD_MS, mientras estemos en MODO_EJERCICIO, se
      * manda la telemetria completa — arranca al recibir $RUN (ver abajo). */
     uint32_t last_exercise_tx = 0U;
@@ -479,33 +479,12 @@ static void LoraTask(void *argument)
             Lora_EnviarTestLora();
         }
 
-        if (s_lora_task.rx_ready) {
-            Lora_ProcesarLinea((char *)s_lora_task.rx_buffer, s_lora_task.rx_count);
-
-            Lora_ResetRx(&s_lora_task);
-            last_printed_count = 0U;
-            accum_start_tick   = 0U;
-        } else {
-            if (s_lora_task.rx_count != last_printed_count) {
-                if (last_printed_count == 0U) {
-                    accum_start_tick = HAL_GetTick();   /* empezo a acumularse justo ahora */
-                }
-                last_printed_count = s_lora_task.rx_count;
-                /* [PRUEBA] Todavia no llega el cierre "***" que cierre la
-                 * linea, pero algo se esta acumulando — imprimirlo igual
-                 * para depurar framing (ver nota arriba). */
-                Log_Printf("LORA", "[PRUEBA] Acumulando (%u bytes, sin * todavia): %s",
-                           s_lora_task.rx_count, (char *)s_lora_task.rx_buffer);
-            }
-
-            if ((s_lora_task.rx_count > 0U) &&
-                ((HAL_GetTick() - accum_start_tick) >= LORA_STALE_TIMEOUT_MS)) {
-                Log_Printf("LORA", "Buffer atascado %lums sin cerrar (%u bytes) — se descarta.",
-                           (unsigned long)(HAL_GetTick() - accum_start_tick), s_lora_task.rx_count);
-                Lora_ResetRx(&s_lora_task);
-                last_printed_count = 0U;
-                accum_start_tick   = 0U;
-            }
+        /* Drena TODAS las lineas pendientes, no solo una — el modulo puede
+         * mandar varias juntas en un solo bloque de DMA (ver comentario de
+         * Lora_StoreBytes() en Lora.h). */
+        char linea[LORA_LINE_MAX_LEN];
+        while (Lora_PopLine(&s_lora_task, linea, sizeof(linea))) {
+            Lora_ProcesarLinea(linea);
         }
 
         if (s_lora_enviar_telemetria) {
