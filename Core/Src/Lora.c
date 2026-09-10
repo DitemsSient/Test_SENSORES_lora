@@ -92,8 +92,8 @@ static bool Lora_SendAndWaitRetry(Lora_Handle_t *h, const char *cmd, const char 
  * @brief  Espera "expect" en lo que ya se fue acumulando en rx_buffer, SIN
  *         mandar nada nuevo ni resetear — para respuestas asincronas que
  *         llegan despues de un comando ya mandado (ej. "JOINED" tras
- *         AT+QJOIN=1, que primero contesta "MAC txDone" de inmediato y
- *         luego "JOINED" cuando el gateway responde).
+ *         AT+QJOIN=1, que primero contesta "OK" de inmediato y luego
+ *         "JOINED" cuando el gateway responde).
  */
 static bool Lora_WaitFor(Lora_Handle_t *h, const char *expect, uint32_t timeout_ms)
 {
@@ -370,10 +370,17 @@ LoraStatus_e Lora_Setup(Lora_Handle_t *h)
  * @brief  Un solo intento de AT+QJOIN=1 + espera de "JOINED" — separado de
  *         Lora_Connect() para poder reintentarlo despues de un reset de
  *         fabrica sin duplicar el codigo (ver Lora_Connect()).
+ * @note   El codigo de referencia del companero espera "MAC txDone" como
+ *         ACK inmediato de AT+QJOIN=1, pero con hardware real (2026-09-09)
+ *         este firmware del KG200Z NUNCA manda esa frase — solo contesta
+ *         "OK" liso (confirmado viendo el log crudo con
+ *         Lora_SendAndWait()). Con "MAC txDone" el codigo se rendia a los
+ *         2s sin llegar nunca a esperar "JOINED" de verdad. Ahora se
+ *         acepta el "OK" real como ACK inmediato.
  */
 static LoraStatus_e Lora_IntentarJoin(Lora_Handle_t *h)
 {
-    if (!Lora_SendAndWait(h, "AT+QJOIN=1\r\n", "MAC txDone", 2000U)) {
+    if (!Lora_SendAndWait(h, "AT+QJOIN=1\r\n", "OK", 2000U)) {
         return LORA_ERR_TIMEOUT;
     }
 
@@ -405,8 +412,8 @@ LoraStatus_e Lora_Connect(Lora_Handle_t *h)
 
     /* Primer intento de join fallido — mismo caso que el codigo de
      * referencia del companero (CODIGO_LORA/lora_kg200z.c, connectLoRa()):
-     * si no llega "MAC txDone" (o nunca llega "JOINED"), se asume que el
-     * modulo quedo en un estado raro y se le manda un reset de fabrica
+     * si no llega el "OK" inmediato (o nunca llega "JOINED"), se asume que
+     * el modulo quedo en un estado raro y se le manda un reset de fabrica
      * (AT+QRFS) antes de reintentar — a diferencia de la referencia (que
      * solo reconfigura y se queda ahi, sin volver a pedir join), aqui SI
      * se reintenta el join una vez mas despues del reset+reconfiguracion,

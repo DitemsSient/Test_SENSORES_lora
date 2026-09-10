@@ -201,11 +201,14 @@ LoraStatus_e Lora_WakeUp(Lora_Handle_t *h);
 LoraStatus_e Lora_Setup(Lora_Handle_t *h);
 
 /**
- * @brief  Hace join a la red LoRaWAN (equivalente a connectLoRa()). Si el
- *         primer AT+QJOIN=1 no confirma ("MAC txDone"/"JOINED"), manda un
- *         reset de fabrica (AT+QRFS), reconfigura con Lora_Setup() y
- *         reintenta el join una vez mas antes de rendirse — mismo patron
- *         que CODIGO_LORA/lora_kg200z.c (connectLoRa()) al fallar el join.
+ * @brief  Hace join a la red LoRaWAN (equivalente a connectLoRa()). Manda
+ *         AT+QJOIN=1, espera el "OK" inmediato (este firmware del KG200Z
+ *         NO manda "MAC txDone" como el codigo de referencia asumia —
+ *         confirmado con hardware real 2026-09-09) y luego espera "JOINED"
+ *         asincrono. Si no confirma, manda un reset de fabrica (AT+QRFS),
+ *         reconfigura con Lora_Setup() y reintenta el join una vez mas
+ *         antes de rendirse — mismo patron que CODIGO_LORA/lora_kg200z.c
+ *         (connectLoRa()) al fallar el join.
  * @param  h  Pointer to the LoRa handle.
  * @retval LORA_OK si el join se confirmo ("JOINED"), LORA_ERR_TIMEOUT si no
  *         (incluso despues del reset de fabrica).
