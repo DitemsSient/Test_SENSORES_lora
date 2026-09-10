@@ -124,6 +124,8 @@ FUNCTION HndlrBleMsg(BYVAL nMsgId AS INTEGER, BYVAL nCtx AS INTEGER)
             connected = 0
             rxAttrHndl = 0
             cccdHndl = 0
+            PRINT "\nDesconectado, razon (nCtx)="
+            PRINT nCtx
             DIM dsMsg$
             dsMsg$ = "$DSCON\r"
             PRINT dsMsg$
