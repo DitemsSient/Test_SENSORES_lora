@@ -489,16 +489,30 @@ void Inicializacion_Run(void) {
 #if INIT_RGB_ENABLE
     Log_Blank();
     Log_Print("RGB", "Probando arcoiris...");
-    for (uint8_t i = 0U; i < INIT_RAINBOW_COLOR_COUNT; i++) {
-        const InitRgbColor_t *c = &s_rainbow[i];
-        Leds_SetRojo(c->r != 0U);
-        Leds_SetVerde(c->g != 0U);
-        Leds_SetAzul(c->b != 0U);
-        HAL_Delay(INIT_RAINBOW_STEP_MS);
+
+    /* Antes esto se marcaba OK sin verificar nada — el LP55231_Begin() de
+     * arriba (antes del bootloader) tampoco revisa su status. La prueba de
+     * arcoiris en si esta bien, pero si el chip ni esta conectado
+     * (confirmado: tarjeta de pruebas sin RGB, igual salia "OK" en el
+     * diagnostico), no tiene caso ni prender los canales — HAL_I2C_IsDeviceReady()
+     * confirma que el LP55231 responde en el bus ANTES de correr el
+     * arcoiris. Si no responde, Diagnostico.rgb queda en FALLO y no se
+     * manda ni un byte mas por I2C hacia el chip. */
+    if (HAL_I2C_IsDeviceReady(&hi2c1, LP55231_ADDR_HAL, 2U, 100U) == HAL_OK) {
+        for (uint8_t i = 0U; i < INIT_RAINBOW_COLOR_COUNT; i++) {
+            const InitRgbColor_t *c = &s_rainbow[i];
+            Leds_SetRojo(c->r != 0U);
+            Leds_SetVerde(c->g != 0U);
+            Leds_SetAzul(c->b != 0U);
+            HAL_Delay(INIT_RAINBOW_STEP_MS);
+        }
+        Leds_Apagar();
+        Diagnostico.rgb = true;
+        Log_Print("RGB", "Prueba de arcoiris terminada.");
+    } else {
+        Diagnostico.rgb = false;
+        Log_Print("RGB", "ERROR: LP55231 no responde en el bus I2C (HAL_I2C_IsDeviceReady).");
     }
-    Leds_Apagar();
-    Diagnostico.rgb = true;
-    Log_Print("RGB", "Prueba de arcoiris terminada.");
     HAL_Delay(INIT_STEP_DELAY_MS);
 #endif
 

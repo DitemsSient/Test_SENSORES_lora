@@ -101,9 +101,6 @@ rc = BleCharCommit(hSvc, txAttr$, hCharTx)
 rc = BleServiceCommit(hSvc)
 PRINT "\nApuntadorTEST listo, iniciando ciclo de advertising\n"
 
-// Arranca el ciclo de anuncio de inmediato
-rc = IniciarAdvertising()
-
 FUNCTION IniciarAdvertising()
     rc = BleAdvRptInit(adRpt$, 2, 0, 20)
     rc = BleAdvRptsCommit(adRpt$, scRpt$)
@@ -159,7 +156,7 @@ FUNCTION HndlrBleMsg(BYVAL nMsgId AS INTEGER, BYVAL nCtx AS INTEGER)
             TimerCancel(5)
             TimerCancel(6)
             TimerCancel(7)
-            TimerCancel(8)
+            TimerCancel(0)
             PRINT "\nDesconectado - reiniciando ciclo de anuncio"
             rc = IniciarAdvertising()
         CASE ELSE
@@ -254,11 +251,11 @@ FUNCTION HndlrCharValue(BYVAL nConnHandle AS INTEGER, BYVAL charHandle AS INTEGE
         TimerStart(3, MSG_DELAY_MS, 0)
         apCount = 0
         TimerStart(7, AP_INTERVAL_MS, 1)
-        TimerStart(8, FIN_TIMEOUT_MS, 0)
+        TimerStart(0, FIN_TIMEOUT_MS, 0)
     ELSEIF runRecibido == 1 && terminado == 0 && STRLEN(Data$) == 5 && StrCmp(Data$, endSTag$) == 0 THEN
         terminado = 1
         TimerCancel(7)
-        TimerCancel(8)
+        TimerCancel(0)
         PRINT "\nEND_S recibido"
         pendienteMsg$ = "ACKEND_S"
         TimerStart(3, MSG_DELAY_MS, 0)
@@ -311,7 +308,7 @@ FUNCTION HndlrTmr6()
 ENDFUNC 1
 
 // Se cumplieron los 2 minutos sin recibir END_S -> mandar END_A y terminar
-FUNCTION HndlrTmr8()
+FUNCTION HndlrTmr0()
     IF terminado == 0 THEN
         terminado = 1
         TimerCancel(7)
@@ -320,6 +317,9 @@ FUNCTION HndlrTmr8()
         TimerStart(3, MSG_DELAY_MS, 0)
     ENDIF
 ENDFUNC 1
+
+// Arranca el ciclo de anuncio de inmediato (ya con todas las funciones definidas arriba)
+rc = IniciarAdvertising()
 
 ONEVENT EVBLEMSG           CALL HndlrBleMsg
 ONEVENT EVBLE_ADV_TIMEOUT  CALL HndlrAdvTimeout
@@ -332,6 +332,6 @@ ONEVENT EVTMR4             CALL HndlrTmr4
 ONEVENT EVTMR5             CALL HndlrTmr5
 ONEVENT EVTMR6             CALL HndlrTmr6
 ONEVENT EVTMR7             CALL HndlrTmr7
-ONEVENT EVTMR8             CALL HndlrTmr8
+ONEVENT EVTMR0             CALL HndlrTmr0
 
 WAITEVENT
