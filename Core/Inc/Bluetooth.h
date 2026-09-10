@@ -46,6 +46,14 @@ extern "C" {
 
 #define BT_ACKCONF_TIMEOUT_MS    1500U  /**< Timeout esperando ACKCONF tras mandar $CONF<datos> */
 
+/* El modulo BL654 (SensoresM.sb) ya reintenta la conexion BLE solo tras un
+ * corte breve de RF (TimerStart(2, RETRY_DELAY_MS=500, 0) en su propio
+ * manejador de desconexion) — confirmado con hardware real 2026-09-10:
+ * un $DSCON puede venir seguido, segundos despues, de un $ACKCON nuevo
+ * porque el modulo ya se reconecto solo. BT_HandleDSCON() espera esta
+ * ventana a ver si eso pasa antes de darse por vencido. */
+#define BT_DSCON_RECONNECT_WINDOW_MS  4000U
+
 /* ========================  ENUMERATIONS  ================================== */
 
 /* Driver status / error codes */

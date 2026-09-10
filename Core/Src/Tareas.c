@@ -690,29 +690,58 @@ static void BT_Blink(bool red, bool green, bool blue, uint32_t period_ms, uint8_
  * @brief  Maneja "$DSCON" — llega en cualquier momento, sin importar que
  *         estabamos esperando. Responde $ACKDSCON y parpadea cian
  *         (verde+azul) LEDS_BT_DSCON_COUNT veces (LEDS_BT_DSCON_MS) —
- *         homologado con la secuencia equivalente de la Mira (prompt del
- *         usuario, 2026-09-09).
- * @note   El modulo Bluetooth es quien retransmite el ACKDSCON si hace
- *         falta — nosotros no reintentamos el envio.
- * @note   TODO: todavia no hay logica de reintento de enlace tras una
- *         desconexion — pendiente a proposito. Por eso esta funcion NUNCA
- *         regresa: tras el parpadeo rojo se queda inerte (nada de volver a
- *         parpadear azul intentando reconectar, seria enganoso porque el
- *         modulo Bluetooth tampoco tiene todavia codigo para reconectarse
- *         solo). Los callers NO deben poner codigo despues de llamarla.
+ *         homologado con la secuencia equivalente de la Mira.
+ * @note   Bug real encontrado con hardware 2026-09-10: el modulo BL654
+ *         (SensoresM.sb) ya reintenta la conexion BLE SOLO tras un corte
+ *         breve de RF (su propio TimerStart(2, RETRY_DELAY_MS, 0) en el
+ *         manejador de desconexion) — confirmado viendo un "$ACKCON"
+ *         nuevo llegar segundos despues de un "$DSCON", sin que nosotros
+ *         hicieramos nada. Antes esta funcion se quedaba inerte para
+ *         siempre apenas veia un DSCON, ignorando ese reintento automatico
+ *         del modulo — por eso "nunca hubo una desconexion real" del otro
+ *         lado (la Mira/kit) pero nosotros si nos dabamos por vencidos.
+ *         Ahora, tras el parpadeo, se espera BT_DSCON_RECONNECT_WINDOW_MS
+ *         a ver si llega un "$ACKCON" nuevo.
+ * @retval true  si se reconecto solo dentro de la ventana (llego un
+ *               "$ACKCON" nuevo) — el caller debe retomar el flujo desde
+ *               "esperando READY" (ver BluetoothTask, retomar_ready).
+ * @retval false si no se reconecto — en ese caso esta funcion NUNCA
+ *               regresa (se queda inerte para siempre, parpadeo terminado,
+ *               sin mas reintentos; los callers NO deben poner codigo
+ *               despues de llamarla asumiendo que regresa false, revisar
+ *               siempre el valor de retorno con un if).
  */
-static void BT_HandleDSCON(void)
+static bool BT_HandleDSCON(void)
 {
     static const uint8_t ackdscon[] = "$ACKDSCON\r";
     Bt_Transmit(&s_bt_task, ackdscon, sizeof(ackdscon) - 1U);
     Log_Print("BT", "DSCON recibido — desconectados.");
 
-    s_bt_conectado  = false;
-    s_ack_pendiente = ACK_NINGUNO;
+    s_bt_conectado = false;
+    /* s_ack_pendiente NO se toca aqui a proposito — es del caller
+     * (BT_HandleRun()/BT_HandleEndS() tienen su propio while que depende
+     * de el; tocarlo aqui rompia esos loops si esta funcion llegaba a
+     * regresar). */
 
     BT_Blink(false, true, true, LEDS_BT_DSCON_MS, LEDS_BT_DSCON_COUNT);   /* cian = verde+azul */
 
-    Log_Print("BT", "TODO: reintento de enlace pendiente de definir — BluetoothTask se queda inerte.");
+    Log_Print("BT", "Esperando reconexion automatica del modulo...");
+    uint32_t start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < BT_DSCON_RECONNECT_WINDOW_MS) {
+        if (s_bt_task.rx_ready) {
+            if (strcmp((char *)s_bt_task.rx_buffer, "ACKCON") == 0) {
+                Bt_ResetRx(&s_bt_task);
+                Log_Print("BT", "Reconectado solo (ACKCON nuevo tras DSCON) — retomando enlace.");
+                Leds_SetAzul(true);
+                s_bt_conectado = true;
+                return true;
+            }
+            Bt_ResetRx(&s_bt_task);
+        }
+        osDelay(20U);
+    }
+
+    Log_Print("BT", "No se reconecto a tiempo — BluetoothTask se queda inerte.");
     for (;;) {
         osDelay(1000U);
     }
@@ -742,7 +771,14 @@ static void BT_HandleRun(void)
         if (s_bt_task.rx_ready) {
             if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
                 Bt_ResetRx(&s_bt_task);
-                BT_HandleDSCON();   /* nunca regresa, ver su doc comment */
+                /* Si BT_HandleDSCON() regresa true, el modulo se
+                 * reconecto solo — pero aqui a media espera de ACKRUN no
+                 * hay forma de "retomar desde READY" como en
+                 * BluetoothTask (haria falta reenviar $CONF completo,
+                 * fuera del alcance de esta funcion). TODO: reintento
+                 * completo del handshake pendiente de definir para este
+                 * caso — de momento solo se sigue esperando ACKRUN. */
+                (void)BT_HandleDSCON();
             }
             if (strcmp((char *)s_bt_task.rx_buffer, "ACKRUN") == 0) {
                 Bt_ResetRx(&s_bt_task);
@@ -787,7 +823,9 @@ static void BT_HandleEndS(void)
         if (s_bt_task.rx_ready) {
             if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
                 Bt_ResetRx(&s_bt_task);
-                BT_HandleDSCON();   /* nunca regresa, ver su doc comment */
+                /* Mismo caso que en BT_HandleRun() — TODO: reintento
+                 * completo del handshake pendiente para este caso. */
+                (void)BT_HandleDSCON();
             }
             if (strcmp((char *)s_bt_task.rx_buffer, "ACKEND_S") == 0) {
                 Bt_ResetRx(&s_bt_task);
@@ -837,9 +875,12 @@ static void BT_HandleEndA(void)
  *         mac1, mac2 no se manda) -> espera "ACKCONF" hasta
  *         BT_ACKCONF_TIMEOUT_MS -> loop de escucha para siempre.
  *         "$DSCON" se atiende SIEMPRE, en cualquier punto de la secuencia
- *         (ver BT_HandleDSCON()) — parpadea rojo y la tarea se queda
- *         inerte, NO reintenta el enlace (pendiente a proposito, ver TODO
- *         en BT_HandleDSCON()).
+ *         (ver BT_HandleDSCON()) — parpadea cian y espera
+ *         BT_DSCON_RECONNECT_WINDOW_MS a ver si el modulo se reconecta
+ *         solo (SensoresM.sb ya reintenta la conexion BLE por su cuenta
+ *         tras un corte breve de RF). Si se reconecta (llega un "$ACKCON"
+ *         nuevo), retoma el flujo desde "esperando READY" (goto
+ *         retomar_ready); si no, ahi si se queda inerte para siempre.
  * @note   Espera a s_lora_conf_listo (LoraTask ya recibio y guardo un
  *         $CONF real) antes de mandar $CON — ya no hay delay simulado.
  * @note   TODO: que hacer tras un timeout de ACKCONF (reintentar, reportar
@@ -875,7 +916,11 @@ static void BluetoothTask(void *argument)
         if (s_bt_task.rx_ready) {
             if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
                 Bt_ResetRx(&s_bt_task);
-                BT_HandleDSCON();   /* nunca regresa, ver su doc comment */
+                if (BT_HandleDSCON()) {
+                    /* Se reconecto solo, el ACKCON nuevo ya se consumio
+                     * dentro de BT_HandleDSCON() — retomar desde ahi. */
+                    goto retomar_ready;
+                }
             }
             /* strcmp exacto, no strncmp de prefijo: "ACKCONF" empieza con
              * las mismas 6 letras que "ACKCON" y haria falso match aqui. */
@@ -899,7 +944,11 @@ static void BluetoothTask(void *argument)
     }
 
     /* Enlazados — LEDs azules fijos mientras Mira y nosotros intercambiamos
-     * servicios/configuracion. Se apagan hasta que llegue ACKCONF. */
+     * servicios/configuracion. Se apagan hasta que llegue ACKCONF.
+     * retomar_ready: tambien es a donde se salta si BT_HandleDSCON()
+     * detecta que el modulo se reconecto solo (ver su doc comment) —
+     * un $ACKCON nuevo deja al enlace exactamente en este mismo punto. */
+retomar_ready:
     Leds_SetAzul(true);
     s_bt_conectado = true;
     Log_Print("BT", "ACKCON recibido — enlazados, esperando READY...");
@@ -908,7 +957,9 @@ static void BluetoothTask(void *argument)
         if (s_bt_task.rx_ready) {
             if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
                 Bt_ResetRx(&s_bt_task);
-                BT_HandleDSCON();   /* nunca regresa, ver su doc comment */
+                if (BT_HandleDSCON()) {
+                    goto retomar_ready;
+                }
             }
             if (strncmp((char *)s_bt_task.rx_buffer, "READY", 5U) == 0) {
                 Bt_ResetRx(&s_bt_task);
@@ -944,7 +995,9 @@ static void BluetoothTask(void *argument)
         if (s_bt_task.rx_ready) {
             if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
                 Bt_ResetRx(&s_bt_task);
-                BT_HandleDSCON();   /* nunca regresa, ver su doc comment */
+                if (BT_HandleDSCON()) {
+                    goto retomar_ready;
+                }
             }
             if (strncmp((char *)s_bt_task.rx_buffer, "ACKCONF", 7U) == 0) {
                 s_ack_pendiente = ACK_NINGUNO;
@@ -993,7 +1046,9 @@ static void BluetoothTask(void *argument)
 
             if (strncmp(line, "DSCON", 5U) == 0) {
                 Bt_ResetRx(&s_bt_task);
-                BT_HandleDSCON();   /* nunca regresa, ver su doc comment */
+                if (BT_HandleDSCON()) {
+                    goto retomar_ready;
+                }
             } else if (strncmp(line, "END_A", 5U) == 0) {
                 Bt_ResetRx(&s_bt_task);
                 BT_HandleEndA();
