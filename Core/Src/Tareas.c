@@ -302,6 +302,17 @@ static void Lora_ProcesarLinea(const char *line)
         const char *contenido = conf_pos + 4;
         if (Lora_ParseDatos(contenido, &g_exercise_data)) {
             Log_Print("LORA", "CONF recibido y guardado en g_exercise_data.");
+            /* [PRUEBA] Diagnostico de la MAC — sospecha de que la MAC real
+             * (armada por el gateway/servidor de otro equipo, a diferencia
+             * de las de prueba tecleadas a mano) pueda traer algun
+             * caracter invisible de mas (espacio, salto de linea perdido,
+             * etc.) que no se note nada mas viendo el %s en el log, pero
+             * que si rompe el chequeo de largo exacto (17 = "CON"+14) que
+             * hace SensoresM.sb al recibir $CON<mac> — con eso el modulo
+             * rechaza la conexion en silencio, sin que nosotros veamos
+             * ningun error. strlen aqui deberia dar EXACTAMENTE 14. */
+            Log_Printf("LORA", "[PRUEBA] mac='%s' strlen=%u (debe ser 14)",
+                       g_exercise_data.mac, (unsigned)strlen(g_exercise_data.mac));
             s_lora_conf_listo = true;
         } else {
             Log_Print("LORA", "ERROR: CONF no se pudo parsear.");
