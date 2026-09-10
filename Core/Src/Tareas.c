@@ -338,6 +338,45 @@ static void Lora_ProcesarLinea(const char *line)
     }
 }
 
+/* [PRUEBA] Simulacion de movimiento para ver cambios en Unity mientras
+ * GpsTask esta deshabilitada (TASK_GPS_ENABLE=0) — punto de partida las
+ * coordenadas reales que dio el usuario (su companero de pruebas). Paso
+ * chico a proposito (~5m por envio) para que se note un desplazamiento
+ * pequeno en el mapa, no un salto brusco. */
+#define SIM_GPS_LAT_INICIAL     19.436408
+#define SIM_GPS_LON_INICIAL    -99.176603
+#define SIM_GPS_STEP_DEG          0.00005   /* ~5m por envio a esta latitud */
+
+/**
+ * @brief  [PRUEBA] Avanza g_exercise_data.latitud/longitud/timestamp un
+ *         poquito en cada llamada (arriba/derecha en el mapa = norte/este,
+ *         +lat/+lon) y pone orientacion/pasos al azar — todo sin sensores
+ *         reales, solo para validar que la app de Unity refleje cambios.
+ *         Quitar/reemplazar por las lecturas reales de GPS/IMU cuando
+ *         TASK_GPS_ENABLE vuelva a 1.
+ */
+static void Lora_SimularMovimiento(void)
+{
+    static bool     inicializado = false;
+    static uint32_t ts_sim = 0U;
+
+    if (!inicializado) {
+        g_exercise_data.latitud  = SIM_GPS_LAT_INICIAL;
+        g_exercise_data.longitud = SIM_GPS_LON_INICIAL;
+        ts_sim = HAL_GetTick() / 1000U;
+        srand(HAL_GetTick());
+        inicializado = true;
+    } else {
+        g_exercise_data.latitud  += SIM_GPS_STEP_DEG;   /* un poco hacia arriba (norte) */
+        g_exercise_data.longitud += SIM_GPS_STEP_DEG;   /* un poco hacia la derecha (este) */
+        ts_sim++;
+    }
+
+    g_exercise_data.timestamp   = ts_sim;
+    g_exercise_data.orientacion = (uint16_t)(rand() % 360);
+    g_exercise_data.pasos       = (uint16_t)(rand() % 2000);
+}
+
 /**
  * @brief  Manda la telemetria de 12 campos de vuelta al gateway
  *         (ID,numOrden,vidas,municion,bateria,latitud,longitud,altitud,
@@ -354,6 +393,8 @@ static void Lora_ProcesarLinea(const char *line)
  */
 static void Lora_EnviarTelemetria(void)
 {
+    Lora_SimularMovimiento();
+
     char csv[160];
     /* Solo bateria_ch (esta tarjeta) va en la telemetria por ahora —
      * bateria_ap (Mira) todavia no se agrega aqui, ver TODO en
