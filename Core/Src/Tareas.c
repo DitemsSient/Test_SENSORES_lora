@@ -56,7 +56,7 @@ extern Ir_Handle_t ir_handle;
  * 2s es buen balance, mucho mas responsivo que los 30s de antes sin
  * saturar nada. En MODO_EJERCICIO no hace falta nada de esto: la
  * telemetria de cada LORA_EXERCISE_PERIOD_MS ya abre su propia ventana. */
-#define TESTLORA_PERIOD_MS    2000U    /**< Cada cuanto se manda "TESTLORA" mientras estamos en MODO_CONFIGURACION */
+#define TESTLORA_PERIOD_MS   15000U    /**< Cada cuanto se manda "TESTLORA" mientras estamos en MODO_CONFIGURACION */
 
 /* Tarjeta de pruebas aislada de LoRa (2026-09-09): solo trae el modulo LoRa
  * y parte de la alimentacion, sin GPS ni sensores conectados — asi que
