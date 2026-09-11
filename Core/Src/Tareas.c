@@ -47,7 +47,16 @@ extern Ir_Handle_t ir_handle;
 
 #define LORA_DMA_BUF_SIZE    256U
 #define LORA_EXERCISE_PERIOD_MS 10000U /**< Cada cuanto se manda telemetria completa en MODO_EJERCICIO */
-#define TESTLORA_PERIOD_MS   30000U    /**< Cada cuanto se manda "TESTLORA" mientras estamos en MODO_CONFIGURACION */
+/* LoRaWAN Clase A (AT+QCLASS=A): solo se puede recibir downlink justo
+ * despues de mandar un uplink — el gateway no puede "empujar" nada, tiene
+ * que esperar a que nosotros transmitamos. Por eso TESTLORA funciona como
+ * "abrir ventana de recepcion" durante MODO_CONFIGURACION: entre mas
+ * seguido se manda, mas rapido llega el $CONF/$RUN real. 500ms es
+ * demasiado agresivo (airtime, limites del network server, bateria) —
+ * 2s es buen balance, mucho mas responsivo que los 30s de antes sin
+ * saturar nada. En MODO_EJERCICIO no hace falta nada de esto: la
+ * telemetria de cada LORA_EXERCISE_PERIOD_MS ya abre su propia ventana. */
+#define TESTLORA_PERIOD_MS    2000U    /**< Cada cuanto se manda "TESTLORA" mientras estamos en MODO_CONFIGURACION */
 
 /* Tarjeta de pruebas aislada de LoRa (2026-09-09): solo trae el modulo LoRa
  * y parte de la alimentacion, sin GPS ni sensores conectados — asi que
