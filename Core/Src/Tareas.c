@@ -142,6 +142,15 @@ bool g_lora_dma_activo = false;
 static volatile bool s_lora_conf_listo       = false;
 static volatile bool s_lora_enviar_telemetria = false;
 
+/* Pausa el TESTLORA periodico entre que llega el $CONF real y que se manda
+ * la telemetria de vuelta con ack=1/0 (tras ACKCONF/timeout) — evita que
+ * el TESTLORA "dummy" se pegue con ese envio real en el modulo (bug real
+ * visto con hardware: con TESTLORA cada pocos segundos, algun envio se
+ * perdia/mezclaba si caia justo junto al de la Mira). Se marca true al
+ * parsear el CONF (Lora_ProcesarLinea) y false otra vez cuando ya se mando
+ * la telemetria real (LoraTask, junto con s_lora_enviar_telemetria). */
+static volatile bool s_lora_testlora_pausado  = false;
+
 /* Bandera que LoraTask marca al recibir $RUN por LoRa — BluetoothTask (que
  * para entonces ya esta en su loop de escucha, tras el ACKCONF) la revisa
  * para mandarle $RUN\r a la Mira y esperar ACKRUN antes de entrar de verdad
@@ -322,6 +331,10 @@ static void Lora_ProcesarLinea(const char *line)
              * ningun error. strlen aqui deberia dar EXACTAMENTE 14. */
             Log_Printf("LORA", "[PRUEBA] mac='%s' strlen=%u (debe ser 14)",
                        g_exercise_data.mac, (unsigned)strlen(g_exercise_data.mac));
+            /* Pausa el TESTLORA periodico hasta que se mande la telemetria
+             * real (ver s_lora_testlora_pausado) — evita que se pegue con
+             * el handshake de Bluetooth/el envio real del ack. */
+            s_lora_testlora_pausado = true;
             s_lora_conf_listo = true;
         } else {
             Log_Print("LORA", "ERROR: CONF no se pudo parsear.");
@@ -448,6 +461,10 @@ static void Lora_EnviarTelemetria(void)
  *         en la tarjeta de pruebas (sin GPS ni sensores, ver
  *         TASK_GPS_ENABLE/TASK_SENSORS_ENABLE), confirmando en el gateway
  *         que el enlace sigue vivo aunque nadie haya mandado $CONF todavia.
+ * @note   Se pausa (ver s_lora_testlora_pausado) entre que llega el $CONF
+ *         real y que se manda la telemetria de vuelta con el ack — bug
+ *         real visto con hardware: si el TESTLORA caia muy pegado al envio
+ *         real del ack, el modulo a veces perdia/mezclaba uno de los dos.
  */
 static void Lora_EnviarTestLora(void)
 {
@@ -522,9 +539,10 @@ static void LoraTask(void *argument)
     uint32_t last_exercise_tx = 0U;
 
     /* Cada TESTLORA_PERIOD_MS, mientras estemos en MODO_CONFIGURACION (antes
-     * de RUN), se manda "TESTLORA" — ver Lora_EnviarTestLora(). En cuanto
-     * entra MODO_EJERCICIO esto se detiene solo (la condicion de abajo deja
-     * de cumplirse) y la telemetria real de arriba toma el relevo. */
+     * de RUN) y no este pausado (ver s_lora_testlora_pausado), se manda
+     * "TESTLORA" — ver Lora_EnviarTestLora(). En cuanto entra MODO_EJERCICIO
+     * esto se detiene solo (la condicion de abajo deja de cumplirse) y la
+     * telemetria real de arriba toma el relevo. */
     uint32_t last_testlora_tx = 0U;
 
     for (;;) {
@@ -534,7 +552,7 @@ static void LoraTask(void *argument)
             Lora_EnviarTelemetria();
         }
 
-        if ((g_modo_operacion == MODO_CONFIGURACION) &&
+        if ((g_modo_operacion == MODO_CONFIGURACION) && !s_lora_testlora_pausado &&
             ((HAL_GetTick() - last_testlora_tx) >= TESTLORA_PERIOD_MS)) {
             last_testlora_tx = HAL_GetTick();
             Lora_EnviarTestLora();
@@ -551,6 +569,13 @@ static void LoraTask(void *argument)
         if (s_lora_enviar_telemetria) {
             s_lora_enviar_telemetria = false;
             Lora_EnviarTelemetria();
+
+            /* Ya se mando la telemetria real (ack=1/0 tras ACKCONF/timeout)
+             * — se retoma el TESTLORA periodico, pero con el cronometro
+             * reiniciado para que el siguiente salga hasta dentro de un
+             * TESTLORA_PERIOD_MS completo, no pegado a este envio. */
+            s_lora_testlora_pausado = false;
+            last_testlora_tx = HAL_GetTick();
         }
 
         osDelay(50U);
