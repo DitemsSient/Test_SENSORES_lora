@@ -105,16 +105,17 @@ extern ModoOperacion_e g_modo_operacion;
  *           CODIGO_LORA de referencia) y que se retransmite a Mira por
  *           Bluetooth (mismo protocolo $CONF<datos>, 8 campos: solo mac1,
  *           mac2 no se manda).
- *         - Telemetria de vuelta al gateway por LoRa (12 campos:
+ *         - Telemetria de vuelta al gateway por LoRa (13 campos:
  *           ID,numOrden,vidas,municion,bateria,latitud,longitud,altitud,
- *           orientacion,pasos,ack,timestamp — latitud ANTES que longitud,
- *           asi lo manda de verdad generarCadena() del codigo de
- *           referencia del companero (CODIGO_LORA/lora_kg200z.c), aunque
- *           su propio comentario diga lo contrario. Reusa los mismos
- *           orden/lora/lives/ammo/bateria_ch de arriba, ver campos nuevos
- *           abajo). El "ack" de esta telemetria es lo que confirma al
- *           gateway que el $CONF se recibio bien (1) o no (0) — no es un
- *           mensaje aparte, es este mismo frame con ack=1.
+ *           orientacion,pasos,ack,timestamp,bateria_ap — latitud ANTES
+ *           que longitud, asi lo manda de verdad generarCadena() del
+ *           codigo de referencia del companero (CODIGO_LORA/lora_kg200z.c),
+ *           aunque su propio comentario diga lo contrario. bateria_ap se
+ *           agrego al final (campo 13) el 2026-09-15, sin correr de lugar
+ *           ningun campo existente. Reusa los mismos orden/lora/lives/
+ *           ammo/bateria_ch de arriba. El "ack" de esta telemetria es el
+ *           codigo de BtGatewayAck_e (ver Bluetooth.h), no un simple
+ *           si/no.
  *         - $A_AP<balas>,<pct_bateria>\r que manda Mira por Bluetooth cada
  *           200ms (solo si cambio algo) — actualiza ammo y bateria_ap.
  *         - Lecturas de sensores que llena SensorsTask cada ciclo.
@@ -133,12 +134,18 @@ typedef struct {
     char     mac2[18];           /**< "mac2" del CSV — reservada, sin uso por ahora */
 
     /* Dos baterias distintas — no son lo mismo. bateria_ch (chaleco = esta
-     * tarjeta, Sensores) es la unica que se manda en la telemetria por
-     * ahora; bateria_ap (apuntador = Mira, viene de $A_AP) se guarda pero
-     * NO se agrega todavia al envio por LoRa — pendiente hasta que se
-     * actualice la base de datos del otro lado para tener este campo. */
+     * tarjeta, Sensores); bateria_ap (apuntador = Mira, viene de $A_AP).
+     * Las dos se mandan en la telemetria por LoRa: bateria_ch en su lugar
+     * de siempre, bateria_ap agregada como campo 13 (al final del CSV,
+     * 2026-09-15), para no correr de posicion ningun campo existente que
+     * el backend ya este leyendo. */
     uint8_t  bateria_ch;         /**< Bateria de ESTA tarjeta (chaleco) — la llena SensorsTask, es la que se manda por LoRa */
-    uint8_t  bateria_ap;         /**< Bateria de la Mira (apuntador) — la llena BluetoothTask via $A_AP, TODO: agregar al envio de telemetria */
+    uint8_t  bateria_ap;         /**< Bateria de la Mira (apuntador) — la llena BluetoothTask via $A_AP, se manda como campo 13 del CSV */
+
+    /* [PRUEBA] Numero/canal LoRa de quien nos disparo — agregado
+     * 2026-09-15, todavia sin llenar (el usuario explica el mecanismo
+     * despues). Deja el campo listo en la estructura mientras tanto. */
+    uint8_t  atacante_numero_lora;
 
     /* Telemetria de vuelta al gateway por LoRa (los que faltaban de la
      * lista de arriba) — en 0 hasta que GPS/IMU los vayan llenando.

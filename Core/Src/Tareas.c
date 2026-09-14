@@ -418,10 +418,11 @@ static void Lora_SimularMovimiento(void)
 }
 
 /**
- * @brief  Manda la telemetria de 12 campos de vuelta al gateway
+ * @brief  Manda la telemetria de 13 campos de vuelta al gateway
  *         (ID,numOrden,vidas,municion,bateria,latitud,longitud,altitud,
- *         orientacion,pasos,ack,timestamp — latitud ANTES que longitud,
- *         ver g_exercise_data), codificada a hex sobre AT+QSEND=1:1:<hex>\r\n
+ *         orientacion,pasos,ack,timestamp,bateria_ap — latitud ANTES que
+ *         longitud, bateria_ap agregada al final el 2026-09-15, ver
+ *         g_exercise_data), codificada a hex sobre AT+QSEND=1:1:<hex>\r\n
  *         (igual que mandarPorLora() del codigo de referencia).
  * @note   El modulo LoRa no confirma nada por su cuenta — solo manda la
  *         trama y ya, no hay "SEND_CONFIRMED" que esperar. (Antes si se
@@ -436,21 +437,21 @@ static void Lora_EnviarTelemetria(void)
     Lora_SimularMovimiento();
 
     char csv[160];
-    /* Solo bateria_ch (esta tarjeta) va en la telemetria por ahora —
-     * bateria_ap (Mira) todavia no se agrega aqui, ver TODO en
-     * Inicializacion.h (pendiente hasta actualizar la base de datos). */
     /* Orden lat/lon: LATITUD antes que LONGITUD — asi lo manda de verdad
      * generarCadena() del codigo de referencia del companero (CODIGO_LORA/
      * lora_kg200z.c), aunque su propio comentario diga "longitud,latitud"
-     * (comentario desactualizado, el codigo real pasa latStr primero). */
-    int  n = snprintf(csv, sizeof(csv), "%u,%u,%u,%u,%u,%.5f,%.5f,%.1f,%u,%u,%u,%lu",
+     * (comentario desactualizado, el codigo real pasa latStr primero).
+     * bateria_ap se agrega al final (campo 13, 2026-09-15) — el resto de
+     * los 12 campos originales no cambia de lugar. */
+    int  n = snprintf(csv, sizeof(csv), "%u,%u,%u,%u,%u,%.5f,%.5f,%.1f,%u,%u,%u,%lu,%u",
                        g_exercise_data.lora, g_exercise_data.orden,
                        g_exercise_data.lives, g_exercise_data.ammo,
                        g_exercise_data.bateria_ch,
                        (double)g_exercise_data.latitud, (double)g_exercise_data.longitud,
                        (double)g_exercise_data.altitud,
                        g_exercise_data.orientacion, g_exercise_data.pasos,
-                       g_exercise_data.ack, (unsigned long)g_exercise_data.timestamp);
+                       g_exercise_data.ack, (unsigned long)g_exercise_data.timestamp,
+                       g_exercise_data.bateria_ap);
 
     if (n <= 0 || (size_t)n >= sizeof(csv)) {
         Log_Print("LORA", "ERROR: CSV de telemetria demasiado grande.");
