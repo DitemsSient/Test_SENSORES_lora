@@ -164,6 +164,16 @@ static volatile bool s_lora_run_recibido = false;
  * BT_HandleEndS(). */
 static volatile bool s_lora_end_s_recibido = false;
 
+/* CalibrateTask marca esta bandera cuando un impacto real valido deja las
+ * vidas en 0 — LoraTask la revisa para mandar $END_M al gateway y correr
+ * Lora_ManejarFinPorVidas() (ver ahi). Mismo patron volatile de siempre. */
+static volatile bool s_vidas_agotadas = false;
+
+/* LoraTask (dentro de Lora_ManejarFinPorVidas()) la marca en false antes
+ * de mandar $END_M y espera a que Lora_ProcesarLinea() la ponga en true al
+ * ver "ACKEND_M" — mismo patron que las demas banderas de ack por LoRa. */
+static volatile bool s_lora_ackend_m_recibido = false;
+
 /* Handle de Bluetooth propio de esta tarea — separado del que usa el
  * smoke test de Inicializacion.c, mismo patron que GPS/Sensores. NO
  * estatico — el HAL_UART_RxCpltCallback compartido (Inicializacion.c) lo
@@ -311,10 +321,10 @@ static void Lora_ProcesarLinea(const char *line)
     char *decoded_str = (char *)decoded;
     Log_Printf("LORA", "[PRUEBA] Payload decodificado: %s", decoded_str);
 
-    char *conf_pos  = strstr(decoded_str, "CONF");
-    char *run_pos   = strstr(decoded_str, "RUN");
-    char *end_s_pos = strstr(decoded_str, "END_S");   /* revisar ANTES que "END" a secas */
-    char *end_pos   = strstr(decoded_str, "END");     /* "END" generico, END_S ya se atendio arriba */
+    char *conf_pos     = strstr(decoded_str, "CONF");
+    char *run_pos      = strstr(decoded_str, "RUN");
+    char *end_s_pos    = strstr(decoded_str, "END_S");
+    char *ackend_m_pos = strstr(decoded_str, "ACKEND_M");   /* respuesta a NUESTRO $END_M, ver Lora_ManejarFinPorVidas() */
 
     if (conf_pos != NULL) {
         const char *contenido = conf_pos + 4;
@@ -351,12 +361,14 @@ static void Lora_ProcesarLinea(const char *line)
          * BluetoothTask). Solo se avisa. */
         Log_Print("LORA", "END_S recibido — avisando a BluetoothTask para mandar $END_S a la Mira.");
         s_lora_end_s_recibido = true;
-    } else if (end_pos != NULL) {
-        /* TODO: "END" a secas (sin "_S") sigue sin logica definida —
-         * de momento solo se loguea, no se hace nada mas. */
-        Log_Print("LORA", "END recibido — logica de fin de ejercicio pendiente de definir.");
+    } else if (ackend_m_pos != NULL) {
+        /* Respuesta a nuestro propio $END_M (ver Lora_ManejarFinPorVidas(),
+         * que es quien esta esperando esto en su propio loop bloqueante) —
+         * solo se marca la bandera, el manejo real vive alla. */
+        Log_Print("LORA", "ACKEND_M recibido.");
+        s_lora_ackend_m_recibido = true;
     } else {
-        Log_Printf("LORA", "Payload de +QEVT sin CONF/RUN/END reconocido: %s", decoded_str);
+        Log_Printf("LORA", "Payload de +QEVT sin CONF/RUN/END_S/ACKEND_M reconocido: %s", decoded_str);
     }
 }
 
@@ -485,6 +497,67 @@ static void Lora_EnviarTestLora(void)
 }
 
 /**
+ * @brief  Manda "END_M" (texto plano, codificado a hex sobre AT+QSEND, sin
+ *         framing $/*** — igual que TESTLORA, ya no hace falta desde el
+ *         rewrite a lineas +QEVT). Avisa al gateway que este jugador se
+ *         quedo sin vidas.
+ */
+static void Lora_EnviarEndM(void)
+{
+    static const char end_m_msg[] = "END_M";
+
+    char hex_payload[(sizeof(end_m_msg) * 2U) + 1U];
+    Lora_EncodeToHex((const uint8_t *)end_m_msg, sizeof(end_m_msg) - 1U, hex_payload);
+
+    char cmd[sizeof(hex_payload) + 16U];
+    int  cmd_len = snprintf(cmd, sizeof(cmd), "AT+QSEND=1:1:%s\r\n", hex_payload);
+    if (cmd_len <= 0 || (size_t)cmd_len >= sizeof(cmd)) {
+        Log_Print("LORA", "ERROR: comando AT+QSEND de END_M demasiado grande.");
+        return;
+    }
+
+    Lora_Transmit(&s_lora_task, (const uint8_t *)cmd, (uint16_t)cmd_len);
+    Log_Print("LORA", "END_M enviado (nos quedamos sin vidas).");
+}
+
+/**
+ * @brief  Fin de ejercicio POR NOSOTROS (vidas en 0, a diferencia de
+ *         $END_S que lo ordena el administrador): manda "END_M" al
+ *         gateway y espera "ACKEND_M" (sin timeout — mismo criterio que
+ *         ACKRUN/ACKEND_S, el gateway ya sabe que nos quedamos sin vidas,
+ *         no tiene caso abandonar la espera). Mientras espera, sigue
+ *         drenando y procesando cualquier otra linea que llegue (igual que
+ *         el loop principal de LoraTask). Al confirmarse:
+ *         manda la telemetria final (datos ya actualizados: vidas=0,
+ *         ultima posicion, etc.), regresa a MODO_CONFIGURACION, y hace el
+ *         mismo parpadeo colorido de fin de juego que BT_HandleEndA()
+ *         (Leds_ParpadeoFinJuego()).
+ * @note   Llamada desde el loop principal de LoraTask cuando CalibrateTask
+ *         marca s_vidas_agotadas — ver ahi.
+ */
+static void Lora_ManejarFinPorVidas(void)
+{
+    s_lora_ackend_m_recibido = false;
+    Lora_EnviarEndM();
+
+    char linea[LORA_LINE_MAX_LEN];
+    while (!s_lora_ackend_m_recibido) {
+        while (Lora_PopLine(&s_lora_task, linea, sizeof(linea))) {
+            Lora_ProcesarLinea(linea);
+        }
+        osDelay(20U);
+    }
+
+    Log_Print("LORA", "ACKEND_M confirmado — mandando telemetria final.");
+    Lora_EnviarTelemetria();
+
+    Modo_SetOperacion(MODO_CONFIGURACION);
+    Log_Print("LORA", "MODO_CONFIGURACION activo — nos quedamos sin vidas, ejercicio terminado.");
+
+    Leds_ParpadeoFinJuego();
+}
+
+/**
  * @brief  Tarea de LoRa: recepcion por DMA circular + linea IDLE (mismo
  *         patron que GpsTask), partida en lineas AT por Lora_StoreBytes()
  *         (ver su doc comment en Lora.h — el modulo manda su propio
@@ -497,8 +570,12 @@ static void Lora_EnviarTestLora(void)
  *         busca, en este orden: "CONF" -> Lora_ParseDatos() directo a
  *         g_exercise_data + marca s_lora_conf_listo (arranca BluetoothTask);
  *         "RUN" -> avisa a BluetoothTask (s_lora_run_recibido); "END_S" ->
- *         avisa a BluetoothTask (s_lora_end_s_recibido); "END" (a secas)
- *         -> TODO, logica de fin de ejercicio pendiente de definir.
+ *         avisa a BluetoothTask (s_lora_end_s_recibido, fin de ejercicio
+ *         por orden del administrador); "ACKEND_M" -> marca
+ *         s_lora_ackend_m_recibido (respuesta a nuestro propio "END_M", ver
+ *         Lora_ManejarFinPorVidas() — fin de ejercicio porque a NOSOTROS se
+ *         nos acabaron las vidas, disparado por CalibrateTask via
+ *         s_vidas_agotadas, mas abajo en este mismo loop).
  * @note   La telemetria de 12 campos (Lora_EnviarTelemetria()) se manda en
  *         dos casos: una vez cuando BluetoothTask marca
  *         s_lora_enviar_telemetria (tras ACKCONF), y periodica cada
@@ -576,6 +653,11 @@ static void LoraTask(void *argument)
              * TESTLORA_PERIOD_MS completo, no pegado a este envio. */
             s_lora_testlora_pausado = false;
             last_testlora_tx = HAL_GetTick();
+        }
+
+        if (s_vidas_agotadas) {
+            s_vidas_agotadas = false;
+            Lora_ManejarFinPorVidas();
         }
 
         osDelay(50U);
@@ -681,9 +763,17 @@ static void SensorsTask(void *argument)
  *             contra CALIB_VALID_WORD (0xAA55). Si coincide, parpadeo
  *             magenta 500ms en los 3 pares fisicos. Se imprime "Impacto:
  *             <dato>" siempre (coincida o no).
- *           - MODO_EJERCICIO: TODO — pendiente (restar vidas + retransmitir
- *             por Bluetooth). De momento solo se drena el buffer para que
- *             no se desborde.
+ *           - MODO_EJERCICIO: disparo real — la trama trae 2 palabras de
+ *             16 bits, "dato" (frame_buf[0..1]) y "ash" (frame_buf[2..3]),
+ *             la misma informacion mandada por duplicado como verificacion
+ *             (sin formula de hash real, es solo redundancia). Valido
+ *             solo si dato == ash; en ese caso se descuenta 1 bala
+ *             (g_exercise_data.ammo) y se manda "$A_SN<vidas>\r" a la Mira
+ *             (numero de vidas ACTUAL, sin cambiar aqui — este disparo
+ *             descuenta municion, no vidas). Si dato != ash, se descarta
+ *             (log de todos modos, para depurar). Si tras esto las vidas
+ *             ya estan en 0, se marca s_vidas_agotadas para que LoraTask
+ *             mande $END_M al gateway (ver Lora_ManejarFinPorVidas()).
  */
 static void CalibrateTask(void *argument)
 {
@@ -708,8 +798,35 @@ static void CalibrateTask(void *argument)
 
                     Log_Printf("CALIB", "Impacto: 0x%04X", dato);
                 } else {
-                    /* MODO_EJERCICIO — pendiente, ver nota arriba. */
-                    Log_Print("CALIB", "Impacto recibido en MODO_EJERCICIO — logica pendiente (restar vidas + Bluetooth).");
+                    /* MODO_EJERCICIO — disparo real, ver nota arriba. */
+                    uint16_t dato = 0U;
+                    uint16_t ash  = 0U;
+                    if (ir_handle.frame_len >= 4U) {
+                        dato = ((uint16_t)ir_handle.frame_buf[0] << 8U) | ir_handle.frame_buf[1];
+                        ash  = ((uint16_t)ir_handle.frame_buf[2] << 8U) | ir_handle.frame_buf[3];
+                    }
+
+                    Log_Printf("CALIB", "Disparo: dato=0x%04X ash=0x%04X", dato, ash);
+
+                    if (ir_handle.frame_len >= 4U && dato == ash) {
+                        if (g_exercise_data.ammo > 0U) {
+                            g_exercise_data.ammo--;
+                        }
+                        Log_Printf("CALIB", "Disparo valido — balas restantes=%u vidas=%u",
+                                   g_exercise_data.ammo, g_exercise_data.lives);
+
+                        char    asn_msg[24];
+                        int32_t asn_len = snprintf(asn_msg, sizeof(asn_msg), "$A_SN%u\r", g_exercise_data.lives);
+                        if (asn_len > 0 && (size_t)asn_len < sizeof(asn_msg)) {
+                            Bt_Transmit(&s_bt_task, (uint8_t *)asn_msg, (uint16_t)asn_len);
+                        }
+
+                        if (g_exercise_data.lives == 0U) {
+                            s_vidas_agotadas = true;
+                        }
+                    } else {
+                        Log_Print("CALIB", "Disparo invalido (dato != ash o trama incompleta) — descartado.");
+                    }
                 }
             }
 
@@ -1050,52 +1167,68 @@ retomar_ready:
     osDelay(150U);
 
     /* $CONF<datos>\r — homogeneo con lo que Mira espera: 8 campos, solo la
-     * primera MAC (mac2 se guarda pero no se manda). */
-    char    payload[160];
-    int32_t n = snprintf(payload, sizeof(payload), "$CONF%u,%u,%s,%s,%u,%u,%lu,%s\r",
-                          g_exercise_data.orden, g_exercise_data.lora,
-                          g_exercise_data.team_name, g_exercise_data.player_name,
-                          g_exercise_data.lives, g_exercise_data.ammo,
-                          (unsigned long)g_exercise_data.tiempo, g_exercise_data.mac);
+     * primera MAC (mac2 se guarda pero no se manda). Se manda hasta
+     * (1 + BT_ACKCONF_REINTENTOS) veces si no llega ACKCONF a tiempo —
+     * BT_ACKCONF_TIMEOUT_MS (30s) por intento. */
+    bool ackconf_ok = false;
+    for (uint8_t intento = 0U; intento <= BT_ACKCONF_REINTENTOS; intento++) {
+        char    payload[160];
+        int32_t n = snprintf(payload, sizeof(payload), "$CONF%u,%u,%s,%s,%u,%u,%lu,%s\r",
+                              g_exercise_data.orden, g_exercise_data.lora,
+                              g_exercise_data.team_name, g_exercise_data.player_name,
+                              g_exercise_data.lives, g_exercise_data.ammo,
+                              (unsigned long)g_exercise_data.tiempo, g_exercise_data.mac);
 
-    if (n > 0 && (size_t)n < sizeof(payload)) {
-        Bt_Transmit(&s_bt_task, (uint8_t *)payload, (uint16_t)n);
-    } else {
-        Log_Print("BT", "ERROR: payload de CONF demasiado grande.");
-    }
-
-    s_ack_pendiente = ACK_CONF;
-    uint32_t ackconf_start = HAL_GetTick();
-    while (s_ack_pendiente == ACK_CONF && (HAL_GetTick() - ackconf_start) < BT_ACKCONF_TIMEOUT_MS) {
-        if (s_bt_task.rx_ready) {
-            if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
-                Bt_ResetRx(&s_bt_task);
-                if (BT_HandleDSCON()) {
-                    goto retomar_ready;
-                }
-            }
-            if (strncmp((char *)s_bt_task.rx_buffer, "ACKCONF", 7U) == 0) {
-                s_ack_pendiente = ACK_NINGUNO;
-            } else {
-                Log_Printf("BT", "RX no reconocido esperando ACKCONF: %s", (char *)s_bt_task.rx_buffer);
-            }
-            Bt_ResetRx(&s_bt_task);
+        if (n > 0 && (size_t)n < sizeof(payload)) {
+            Bt_Transmit(&s_bt_task, (uint8_t *)payload, (uint16_t)n);
+            Log_Printf("BT", "CONF enviado (intento %u/%u), esperando ACKCONF...",
+                       (unsigned)(intento + 1U), (unsigned)(BT_ACKCONF_REINTENTOS + 1U));
+        } else {
+            Log_Print("BT", "ERROR: payload de CONF demasiado grande.");
         }
-        osDelay(20U);
-    }
 
-    if (s_ack_pendiente == ACK_NINGUNO) {
-        Log_Print("BT", "ACKCONF recibido.");
-        /* Senal para LoraTask: ya se confirmo el CONF con Mira, toca
-         * mandar la telemetria de vuelta al gateway con ack=1. */
-        g_exercise_data.ack   = 1U;
-        s_lora_enviar_telemetria = true;
-    } else {
+        s_ack_pendiente = ACK_CONF;
+        uint32_t ackconf_start = HAL_GetTick();
+        while (s_ack_pendiente == ACK_CONF && (HAL_GetTick() - ackconf_start) < BT_ACKCONF_TIMEOUT_MS) {
+            if (s_bt_task.rx_ready) {
+                if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
+                    Bt_ResetRx(&s_bt_task);
+                    if (BT_HandleDSCON()) {
+                        goto retomar_ready;
+                    }
+                }
+                if (strncmp((char *)s_bt_task.rx_buffer, "ACKCONF", 7U) == 0) {
+                    s_ack_pendiente = ACK_NINGUNO;
+                } else {
+                    Log_Printf("BT", "RX no reconocido esperando ACKCONF: %s", (char *)s_bt_task.rx_buffer);
+                }
+                Bt_ResetRx(&s_bt_task);
+            }
+            osDelay(20U);
+        }
+
+        if (s_ack_pendiente == ACK_NINGUNO) {
+            ackconf_ok = true;
+            break;
+        }
         s_ack_pendiente = ACK_NINGUNO;
         Log_Print("BT", "ERROR: no llego ACKCONF a tiempo.");
-        g_exercise_data.ack   = 0U;
+    }
+
+    if (ackconf_ok) {
+        Log_Print("BT", "ACKCONF recibido.");
+        /* Senal para LoraTask: ya se confirmo el CONF con Mira, toca
+         * mandar la telemetria de vuelta al gateway con este estado. */
+        g_exercise_data.ack   = (uint8_t)BT_GW_ACK_CONFIRMADO;
         s_lora_enviar_telemetria = true;
-        /* TODO: pendiente de definir que mas hacemos aqui (reintentar, etc.). */
+    } else {
+        Log_Print("BT", "ERROR: no llego ACKCONF ni con el reintento — se avisa al gateway.");
+        g_exercise_data.ack   = (uint8_t)BT_GW_ACK_SIN_ACKCONF;
+        s_lora_enviar_telemetria = true;
+        /* TODO: pendiente de definir el comando de desconexion BLE +
+         * reintento completo del handshake desde $CON (2026-09-14) — por
+         * ahora, tras avisar al gateway, se sigue igual al loop de
+         * escucha sin forzar ninguna desconexion. */
     }
 
     /* Ya se confirmo el intercambio (o se agoto el tiempo) — no hace falta

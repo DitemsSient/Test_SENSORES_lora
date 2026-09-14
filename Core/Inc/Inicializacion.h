@@ -150,7 +150,7 @@ typedef struct {
     float    altitud;
     uint16_t orientacion;
     uint16_t pasos;
-    uint8_t  ack;                /**< 1 si Mira confirmo el $CONF con $ACKCONF, 0 si no */
+    uint8_t  ack;                /**< Codigo de estado del enlace BLE con la Mira — ver BtGatewayAck_e en Bluetooth.h (1=confirmado, 2=sin conexion [pendiente], 3=conecto pero sin ACKCONF) */
     uint32_t timestamp;
 
     /* Sensores — llenados por SensorsTask */

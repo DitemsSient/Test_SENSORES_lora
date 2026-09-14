@@ -44,7 +44,8 @@ extern "C" {
 /* Advertise protocol — espera de ACKCON es indefinida (ver BluetoothTask en
  * Tareas.c), no tiene timeout propio. */
 
-#define BT_ACKCONF_TIMEOUT_MS    1500U  /**< Timeout esperando ACKCONF tras mandar $CONF<datos> */
+#define BT_ACKCONF_TIMEOUT_MS   30000U  /**< Timeout esperando ACKCONF tras mandar $CONF<datos> (por intento — hay 1 reintento, ver BT_ACKCONF_REINTENTOS) */
+#define BT_ACKCONF_REINTENTOS       1U  /**< Cuantas veces se reenvia $CONF si no llego ACKCONF antes de rendirse */
 
 /* El modulo BL654 (SensoresM.sb) ya reintenta la conexion BLE solo tras un
  * corte breve de RF (TimerStart(2, RETRY_DELAY_MS=500, 0) en su propio
@@ -79,6 +80,21 @@ typedef enum {
     ACK_CONF,       /**< esperando "ACKCONF", tras mandar $CONF<datos>     */
     ACK_END_S,      /**< esperando "ACKEND_S", tras mandar $END_S (fin de ejercicio, ver BT_HandleEndS() en Tareas.c) */
 } AckEstado_e;
+
+/** @brief Codigo de estado del enlace con la Mira que se manda al gateway
+ *         en el campo "ack" de la telemetria (g_exercise_data.ack) — la
+ *         pagina/app que consume esos datos usa este numero para saber que
+ *         paso, no solo "si"/"no". Ver BluetoothTask en Tareas.c.
+ * @note   BT_GW_ACK_SIN_CONEXION (2) esta definido pero TODAVIA NO SE USA
+ *         — el timeout de ACKCON sigue siendo indefinido a proposito
+ *         (pendiente decidir como manejar ese caso, 2026-09-14). Se deja
+ *         el valor reservado desde ahora para que el resto del enum no
+ *         cambie de numero cuando se implemente. */
+typedef enum {
+    BT_GW_ACK_CONFIRMADO   = 1,   /**< Conectado por BLE y ACKCONF recibido (con o sin reintento) */
+    BT_GW_ACK_SIN_CONEXION = 2,   /**< TODO/pendiente: nunca llego ACKCON — timeout de conexion BLE aun sin definir */
+    BT_GW_ACK_SIN_ACKCONF  = 3,   /**< Conecto por BLE pero nunca llego ACKCONF, ni con el reintento — falta definir el comando de desconexion+reintento completo */
+} BtGatewayAck_e;
 
 /* ============================  STRUCTURES  ================================ */
 
