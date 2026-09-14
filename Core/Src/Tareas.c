@@ -407,13 +407,55 @@ static void Lora_ProcesarLinea(const char *line)
 #define SIM_GPS_LON_INICIAL    -99.176603
 #define SIM_GPS_STEP_DEG          0.00005   /* ~5m por envio a esta latitud */
 
+#if TASK_GPS_ENABLE
 /**
- * @brief  [PRUEBA] Avanza g_exercise_data.timestamp de 1 en 1 y pone
- *         orientacion/pasos al azar en cada llamada — mas
- *         latitud/longitud tambien (arriba/derecha en el mapa =
- *         norte/este, +lat/+lon), pero SOLO si TASK_GPS_ENABLE==0 (ver
- *         nota arriba). Quitar/reemplazar por las lecturas reales de
- *         GPS/IMU cuando orientacion/pasos ya se calculen de verdad.
+ * @brief  Convierte year/month/day/hour/minute/second del GPS a timestamp
+ *         Unix (segundos UTC desde 1970-01-01), usando el algoritmo de
+ *         calendario de Howard Hinnant (dominio publico, solo enteros, sin
+ *         floats). GPS.c guarda esos campos ya en HORA LOCAL (les aplica
+ *         Gps_GetTimezoneOffset() antes de entregarlos, ver Gps_Process())
+ *         — aqui se le resta ese mismo offset de vuelta para recuperar
+ *         UTC real, que es lo que necesita un timestamp Unix de verdad
+ *         (2026-09-15, decidido con el usuario: UTC, no hora local).
+ * @param  h  Handle de GPS (normalmente &s_gps_task) — se asume que ya se
+ *            confirmo h->data.datetime_valid antes de llamar esto.
+ * @retval Timestamp Unix en UTC.
+ */
+static uint32_t Gps_ComputeEpochUTC(const Gps_Handle_t *h)
+{
+    int32_t y = (int32_t)h->data.year;
+    int32_t m = (int32_t)h->data.month;
+    int32_t d = (int32_t)h->data.day;
+
+    y -= (m <= 2) ? 1 : 0;
+    int32_t era = (y >= 0 ? y : y - 399) / 400;
+    uint32_t yoe = (uint32_t)(y - era * 400);
+    uint32_t doy = (uint32_t)((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1);
+    uint32_t doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+    int32_t  dias_desde_epoch = era * 146097 + (int32_t)doe - 719468;
+
+    uint32_t epoch_local = (uint32_t)dias_desde_epoch * 86400U
+                          + (uint32_t)h->data.hour   * 3600U
+                          + (uint32_t)h->data.minute * 60U
+                          + (uint32_t)h->data.second;
+
+    int8_t  offset_h  = Gps_GetTimezoneOffset(h->data.longitude);
+    int32_t epoch_utc = (int32_t)epoch_local - ((int32_t)offset_h * 3600);
+
+    return (uint32_t)epoch_utc;
+}
+#endif
+
+/**
+ * @brief  Llena g_exercise_data.timestamp/orientacion/pasos (y
+ *         latitud/longitud si TASK_GPS_ENABLE==0, ver nota arriba) antes
+ *         de cada telemetria.
+ * @note   timestamp: con GPS real y fix valido (h->data.datetime_valid),
+ *         usa el Unix real en UTC (Gps_ComputeEpochUTC()). Sin fix
+ *         todavia (o en la tarjeta de pruebas sin GPS), sigue un contador
+ *         de 1 en 1 — decidido con el usuario 2026-09-15: la app espera
+ *         que este campo SIEMPRE cambie entre envios para refrescar la
+ *         UI, aunque no sea un timestamp real todavia.
  */
 static void Lora_SimularMovimiento(void)
 {
@@ -436,7 +478,16 @@ static void Lora_SimularMovimiento(void)
         ts_sim++;
     }
 
-    g_exercise_data.timestamp   = ts_sim;
+#if TASK_GPS_ENABLE
+    if (s_gps_task.data.datetime_valid) {
+        g_exercise_data.timestamp = Gps_ComputeEpochUTC(&s_gps_task);
+    } else {
+        g_exercise_data.timestamp = ts_sim;
+    }
+#else
+    g_exercise_data.timestamp = ts_sim;
+#endif
+
     g_exercise_data.orientacion = (uint16_t)(rand() % 360);
     g_exercise_data.pasos       = (uint16_t)(rand() % 2000);
 }
