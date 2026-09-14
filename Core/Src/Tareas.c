@@ -1005,20 +1005,29 @@ static void SensorsTask(void *argument)
  *             contra CALIB_VALID_WORD (0xAA55). Si coincide, parpadeo
  *             magenta 500ms en los 3 pares fisicos. Se imprime "Impacto:
  *             <dato>" siempre (coincida o no).
- *           - MODO_EJERCICIO: disparo real — la trama trae 2 palabras de
- *             16 bits, "dato" (frame_buf[0..1]) y "ash" (frame_buf[2..3]),
- *             la misma informacion mandada por duplicado como verificacion
- *             (sin formula de hash real, es solo redundancia). Valido
- *             solo si dato == ash; en ese caso se descuenta 1 VIDA
+ *           - MODO_EJERCICIO: disparo real — protocolo CONFIRMADO 2026-09-15
+ *             directo con el codigo de Transmision_Laser_IR.c de la Mira
+ *             (Tx_IR_SendFrame(frame, 2U), un solo burst continuo dentro de
+ *             la ISR del gatillo, sin gaps extra): la trama trae 3 BYTES,
+ *             no 4 — frame_buf[0]=orden, frame_buf[1]=lora (numero/canal
+ *             LoRa de quien dispara), frame_buf[2]=checksum (XOR simple,
+ *             orden^lora, NO un CRC). ANTES se asumia (mal, nunca validado
+ *             contra hardware real) una trama de 4 bytes con "dato" de 16
+ *             bits duplicado como "ash" — por eso frame_len nunca llegaba
+ *             a lo esperado y CASI NINGUN disparo real se contaba nunca
+ *             (siempre "invalido", dato/ash se quedaban en 0x0000 porque ni
+ *             se llegaban a leer). Valido solo si frame_len>=3 y
+ *             checksum==(orden^lora); en ese caso se descuenta 1 VIDA
  *             (g_exercise_data.lives) y se reporta por los 2 canales:
  *             Bluetooth ("$A_SN<vidas>\r" a la Mira, vidas YA actualizada)
- *             y LoRa (se encola "dato" — el numero/canal de quien nos
+ *             y LoRa (se encola "lora" — el numero/canal de quien nos
  *             disparo — en s_atacante_buffer, para que LoraTask lo mande
  *             en el campo atacante_numero_lora de la siguiente telemetria,
- *             ver ATACANTE_REPORT_PERIOD_MS). Si dato != ash, se descarta
- *             (log de todos modos, para depurar). Si tras esto las vidas
- *             ya estan en 0, se marca s_vidas_agotadas para que LoraTask
- *             mande $END_M al gateway (ver Lora_ManejarFinPorVidas()).
+ *             ver ATACANTE_REPORT_PERIOD_MS). Si el checksum no cuadra, se
+ *             descarta (log de todos modos, para depurar). Si tras esto
+ *             las vidas ya estan en 0, se marca s_vidas_agotadas para que
+ *             LoraTask mande $END_M al gateway (ver
+ *             Lora_ManejarFinPorVidas()).
  */
 static void CalibrateTask(void *argument)
 {
@@ -1041,18 +1050,22 @@ static void CalibrateTask(void *argument)
 
                     Log_Printf("CALIB", "Impacto: 0x%04X", dato);
                 } else {
-                    /* MODO_EJERCICIO — disparo real, ver nota arriba. */
-                    uint16_t dato = 0U;
-                    uint16_t ash  = 0U;
-                    if (ir_handle.frame_len >= 4U) {
-                        dato = ((uint16_t)ir_handle.frame_buf[0] << 8U) | ir_handle.frame_buf[1];
-                        ash  = ((uint16_t)ir_handle.frame_buf[2] << 8U) | ir_handle.frame_buf[3];
+                    /* MODO_EJERCICIO — disparo real, protocolo real de 3
+                     * bytes confirmado 2026-09-15, ver nota arriba. */
+                    uint8_t orden    = 0U;
+                    uint8_t lora     = 0U;
+                    uint8_t checksum = 0U;
+                    if (ir_handle.frame_len >= 3U) {
+                        orden    = ir_handle.frame_buf[0];
+                        lora     = ir_handle.frame_buf[1];
+                        checksum = ir_handle.frame_buf[2];
                     }
+                    bool valido = (ir_handle.frame_len >= 3U) && (checksum == (uint8_t)(orden ^ lora));
 
-                    Log_Printf("CALIB", "Disparo: dato=0x%04X ash=0x%04X (raw_count=%u frame_len=%u)",
-                               dato, ash, (unsigned)raw_count, (unsigned)ir_handle.frame_len);
+                    Log_Printf("CALIB", "Disparo: orden=0x%02X lora=0x%02X checksum=0x%02X (raw_count=%u frame_len=%u)",
+                               orden, lora, checksum, (unsigned)raw_count, (unsigned)ir_handle.frame_len);
 
-                    if (ir_handle.frame_len >= 4U && dato == ash) {
+                    if (valido) {
                         if (g_exercise_data.lives > 0U) {
                             g_exercise_data.lives--;
                         }
@@ -1065,12 +1078,12 @@ static void CalibrateTask(void *argument)
                             Bt_Transmit(&s_bt_task, (uint8_t *)asn_msg, (uint16_t)asn_len);
                         }
 
-                        /* Encola al atacante (el "dato" recibido ES su
-                         * numero/canal LoRa) para que LoraTask lo reporte
-                         * en el campo atacante_numero_lora de la proxima
+                        /* Encola al atacante ("lora" = numero/canal LoRa de
+                         * quien disparo) para que LoraTask lo reporte en el
+                         * campo atacante_numero_lora de la proxima
                          * telemetria — ver ATACANTE_BUFFER_MAX arriba. */
                         if (s_atacante_count < ATACANTE_BUFFER_MAX) {
-                            s_atacante_buffer[s_atacante_head] = (uint8_t)dato;
+                            s_atacante_buffer[s_atacante_head] = lora;
                             s_atacante_head = (uint8_t)((s_atacante_head + 1U) % ATACANTE_BUFFER_MAX);
                             s_atacante_count++;
                         } else {
@@ -1081,7 +1094,7 @@ static void CalibrateTask(void *argument)
                             s_vidas_agotadas = true;
                         }
                     } else {
-                        Log_Print("CALIB", "Disparo invalido (dato != ash o trama incompleta) — descartado.");
+                        Log_Print("CALIB", "Disparo invalido (checksum no cuadra o trama incompleta) — descartado.");
                     }
                 }
             }
