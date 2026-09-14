@@ -68,7 +68,11 @@
 #define configTICK_RATE_HZ                       ((TickType_t)1000)
 #define configMAX_PRIORITIES                     ( 56 )
 #define configMINIMAL_STACK_SIZE                 ((uint16_t)128)
-#define configTOTAL_HEAP_SIZE                    ((size_t)32768)
+/* RAM real de este MCU (STM32L433CC) es de solo 48KB — bajado de 32768 a
+ * 31744 el 2026-09-15 porque el link fallaba por 504 bytes de overflow al
+ * agregar unas variables locales de diagnostico en SensorsTask (Tareas.c).
+ * Si vuelve a fallar el link por RAM, este es el primer lugar a revisar. */
+#define configTOTAL_HEAP_SIZE                    ((size_t)31744)
 #define configMAX_TASK_NAME_LEN                  ( 16 )
 #define configUSE_TRACE_FACILITY                 1
 #define configUSE_16_BIT_TICKS                   0
