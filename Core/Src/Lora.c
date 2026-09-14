@@ -42,12 +42,13 @@ static bool Lora_SendAndWait(Lora_Handle_t *h, const char *cmd, const char *expe
         HAL_Delay(20U);
     }
 
-    /* Imprime SIEMPRE lo que en verdad contesto el modulo, encontrara o no
-     * "expect" — util para depurar el init a ojo. No hace falta DMA para
-     * esto: la recepcion IT (Lora_StoreByte(), armada por Lora_Init())
-     * ya va llenando h->rx_buffer byte a byte, solo faltaba loguearlo. */
+#if LORA_VERBOSE_LOG
+    /* Dump linea por linea — solo con LORA_VERBOSE_LOG=1 (ver Lora.h). En
+     * modo normal esto quedaba clavado en el logger, tapando lo que si
+     * importa (si hubo cambios de config, si el join funciono, errores). */
     Log_Printf("LORA", "[INIT] %s -> %s", cmd,
                (h->rx_count > 0U) ? (char *)h->rx_buffer : "(sin respuesta)");
+#endif
 
     return found;
 }
@@ -113,6 +114,59 @@ static uint8_t Lora_HexCharToVal(char c)
     if (c >= 'A' && c <= 'F') return (uint8_t)(c - 'A' + 10);
     if (c >= 'a' && c <= 'f') return (uint8_t)(c - 'a' + 10);
     return 0U;
+}
+
+/**
+ * @brief  Copia a "out" la linea de "buf" que empieza en "needle", cortada
+ *         en el primer \r o \n — para sacar solo "QAPPKEY:...."/"QDEUI:...."
+ *         del bloque completo que deja Lora_SendAndWait() en rx_buffer
+ *         (que trae el eco del comando + la respuesta + el "OK").
+ */
+static void Lora_ExtractLine(const char *buf, const char *needle, char *out, size_t out_size)
+{
+    out[0] = '\0';
+    if (buf == NULL || needle == NULL || out_size == 0U) return;
+
+    const char *p = strstr(buf, needle);
+    if (p == NULL) return;
+
+    size_t i = 0U;
+    while (p[i] != '\0' && p[i] != '\r' && p[i] != '\n' && i < (out_size - 1U)) {
+        out[i] = p[i];
+        i++;
+    }
+    out[i] = '\0';
+}
+
+/**
+ * @brief  Manda AT+QAPPKEY=?, AT+QDEUI=? y AT+QAPPEUI=? (pedido del usuario
+ *         2026-09-15 para tener a la mano el EUI/AppKey/AppEUI reales del
+ *         modulo fisico, ver manual de referencia del KG200Z) y los
+ *         imprime en un bloque aparte, facil de encontrar en el logger.
+ * @note   Se manda justo despues de confirmar el ATQ, antes de la
+ *         configuracion normal (AT+QVL, AT+QBAND, etc) — no cambia nada en
+ *         el modulo, solo consulta.
+ */
+static void Lora_LogIdentityInfo(Lora_Handle_t *h)
+{
+    char appkey[64] = "(sin respuesta)";
+    char deui[64]   = "(sin respuesta)";
+    char appeui[64] = "(sin respuesta)";
+
+    Lora_SendAndWait(h, "AT+QAPPKEY=?\r\n", "QAPPKEY", LORA_CMD_TIMEOUT_MS);
+    Lora_ExtractLine((char *)h->rx_buffer, "QAPPKEY:", appkey, sizeof(appkey));
+
+    Lora_SendAndWait(h, "AT+QDEUI=?\r\n", "QDEUI", LORA_CMD_TIMEOUT_MS);
+    Lora_ExtractLine((char *)h->rx_buffer, "QDEUI:", deui, sizeof(deui));
+
+    Lora_SendAndWait(h, "AT+QAPPEUI=?\r\n", "QAPPEUI", LORA_CMD_TIMEOUT_MS);
+    Lora_ExtractLine((char *)h->rx_buffer, "QAPPEUI:", appeui, sizeof(appeui));
+
+    Log_Print("LORA", "*************** INFO LORA ***************");
+    Log_Printf("LORA", "%s", appkey);
+    Log_Printf("LORA", "%s", deui);
+    Log_Printf("LORA", "%s", appeui);
+    Log_Print("LORA", "*******************************************");
 }
 
 /* ========================  PUBLIC FUNCTIONS  =============================== */
@@ -316,6 +370,8 @@ LoraStatus_e Lora_Setup(Lora_Handle_t *h)
         Log_Print("LORA", "ERROR: modulo no responde a ATQ.");
         return LORA_ERR_UART;
     }
+
+    Lora_LogIdentityInfo(h);   /* AppKey/DevEUI/AppEUI reales del modulo, ver nota arriba */
 
     Lora_SendAndWait(h, "AT+QVL=0\r\n", "OK", LORA_CMD_TIMEOUT_MS);   /* log level, no critico */
 

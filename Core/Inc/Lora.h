@@ -32,6 +32,14 @@ extern "C" {
 
 #define LORA_UART               (&huart2)
 
+/* Switch de depuracion (2026-09-15, pedido del usuario) — en 0 (normal),
+ * el logger solo muestra mensajes de alto nivel (inicio de config, si hubo
+ * cambios, resultado del join, errores) — nada de linea por linea. Poner
+ * en 1 cuando haga falta ver TODO lo que manda/contesta el modulo
+ * (comando por comando, igual que antes) para depurar un problema real —
+ * ver Lora_SendAndWait() en Lora.c y Lora_ProcesarLinea() en Tareas.c. */
+#define LORA_VERBOSE_LOG        0U
+
 /* Timeouts */
 
 #define LORA_TX_TIMEOUT_MS      500U    /**< Transmit timeout in ms          */
