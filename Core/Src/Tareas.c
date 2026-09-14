@@ -92,13 +92,14 @@ extern Ir_Handle_t ir_handle;
  * telemetria de cada LORA_EXERCISE_PERIOD_MS ya abre su propia ventana. */
 #define TESTLORA_PERIOD_MS   15000U    /**< Cada cuanto se manda "TESTLORA" mientras estamos en MODO_CONFIGURACION */
 
-/* En TEST_SN_LORA (2026-09-15) es al reves de la tarjeta de pruebas
- * aislada de LoRa: aqui SI hay GPS y sensores reales conectados, lo unico
- * que falta es el modulo LoRa fisico — por eso GpsTask/SensorsTask vuelven
- * a 1U en esta rama. TESTLORA se queda igual (dentro del loop de LoraTask,
- * sin tarea aparte) porque ese envio no depende de si hay sensores o no. */
-#define TASK_GPS_ENABLE          1U
-#define TASK_SENSORS_ENABLE      1U
+/* En master estos dos se quedan en 0U a proposito — no asumir hardware de
+ * GPS/sensores conectado por default. Se suben a 1U solo en la rama
+ * TEST_SN_LORA (tarjeta de pruebas del usuario, con GPS/IMU/mag/luz reales
+ * pero sin modulo LoRa fisico) — ver esa rama si hace falta esa
+ * configuracion. TESTLORA (envio periodico dentro de LoraTask) no depende
+ * de esto. */
+#define TASK_GPS_ENABLE          0U
+#define TASK_SENSORS_ENABLE      0U
 
 /* ======================  STATIC VARIABLES  ================================ */
 
