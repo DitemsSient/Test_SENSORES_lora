@@ -163,10 +163,12 @@ void Log_Task(void *argument)
     LogEntry_t entry;
     for (;;) {
         if (osMessageQueueGet(s_queue, &entry, NULL, osWaitForever) == osOK) {
-            /* Salto de linea ANTES de cada entrada — separa visualmente
-             * cada log en la terminal (sin esto salen todos pegados y es
-             * dificil de leer durante debug). */
-            Log_TransmitUSB((uint8_t *)"\r\n", 2U);
+            /* Salto de linea extra ANTES de cada entrada QUITADO (2026-09-15,
+             * pedido del usuario) — dejaba una linea en blanco entre cada
+             * mensaje (entry.line ya trae su propio "\r\n" al final, ver
+             * Log_Print()). Quien quiera separar visualmente un bloque debe
+             * llamar Log_Blank() a proposito, como en el bloque de arranque
+             * de Tareas_CrearTareas(). */
             Log_TransmitUSB((uint8_t *)entry.line, entry.len);
         }
     }

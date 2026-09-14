@@ -24,6 +24,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 
 /* ======================  EXTERNAL HAL HANDLES  ============================ */
 
@@ -40,8 +41,34 @@ extern Ir_Handle_t ir_handle;
 
 #define GPS_DMA_BUF_SIZE     256U
 #define GPS_HEARTBEAT_MS   20000U
-#define SENSORS_PERIOD_MS  25000U
+/* Bajado de 25000 a 100 el 2026-09-15: ya NO es solo diagnostico — el
+ * conteo de pasos (Steps_Update(), ver abajo) necesita muestrear el
+ * acelerometro varias veces por segundo para no perderse los picos de cada
+ * paso (cadencia tipica al caminar ~1.5-2.5 Hz, con 100ms/10Hz hay margen
+ * de sobra). Si esto sube de nuevo, el detector de pasos deja de servir. */
+#define SENSORS_PERIOD_MS  100U
 #define CALIB_PERIOD_MS      300U
+
+/* ==================  DETECCION DE PASOS (acelerometro)  ==================== */
+
+/* Umbral de histeresis sobre la magnitud del vector de aceleracion (g).
+ * En reposo |v|~1.0 (solo gravedad); cada paso mete un pico dinamico
+ * encima de eso. Cruzar STEP_THRESHOLD_HIGH_G hacia arriba (armado) cuenta
+ * un paso; hay que volver a cruzar STEP_THRESHOLD_LOW_G hacia abajo para
+ * "rearmar" el detector antes de que cuente el siguiente — evita contar
+ * varias veces el mismo pico ruidoso. STEP_MIN_INTERVAL_MS es un segundo
+ * filtro (refractario) por si el rearme es demasiado rapido.
+ * VALORES: ajustados 2026-09-15 tras primera prueba real — con
+ * 1.15/0.95 solo se contaron 4 de ~12-15 pasos reales dados por el
+ * usuario, porque varios picos de |v| se quedaban en 1.10-1.14, justo
+ * debajo del umbral. Bajado a 1.08/0.97 — sigue muy por arriba del ruido
+ * de reposo medido (|v| fluctuaba +-0.01/0.02g quieta), pero ya agarra
+ * picos mas suaves. Sigue siendo un punto de partida, falta otra prueba
+ * con conteo real para confirmar que no se paso para el otro lado
+ * (contar de mas). */
+#define STEP_THRESHOLD_HIGH_G   1.08f
+#define STEP_THRESHOLD_LOW_G    0.97f
+#define STEP_MIN_INTERVAL_MS    300U
 #define CALIB_RAW_MIN         16U    /**< raw_count > esto para considerar el buffer valido (ver Test_IR: tramas reales de 2 bytes dan 17-19 deltas) */
 #define CALIB_VALID_WORD  0xAA55U
 
@@ -258,7 +285,8 @@ static void GpsTask(void *argument)
 
     HAL_UARTEx_ReceiveToIdle_DMA(GPS_UART, s_gps_dma_buf, GPS_DMA_BUF_SIZE);
     g_gps_dma_activo = true;   /* HAL_UART_ErrorCallback ya no debe re-armar IT */
-    Log_Print("GPS", "GpsTask arrancada (DMA circular + linea IDLE).");
+    /* Anuncio de arranque QUITADO (2026-09-15) — ya sale en el bloque
+     * consolidado de Tareas_CrearTareas(), antes de osKernelStart(). */
 
     uint32_t sentence_count    = 0U;
     uint32_t last_status_tick  = HAL_GetTick();
@@ -314,11 +342,17 @@ static void GpsTask(void *argument)
  */
 static void Lora_ProcesarLinea(const char *line)
 {
-    Log_Printf("LORA", "[PRUEBA] Linea RX: %s", line);
-
     if (strncmp(line, "+QEVT:", 6U) != 0) {
-        return;   /* eco de comando, "OK", "+QEVT:SEND_CONFIRMED", etc. — nada que hacer */
+        /* eco de comando, "OK", "NO_NETWORK_JOINED", "+QEVT:SEND_CONFIRMED",
+         * etc. — nada que hacer, y en modo normal ni se loguea (ver
+         * LORA_VERBOSE_LOG en Lora.h) porque no trae datos del gateway. */
+#if LORA_VERBOSE_LOG
+        Log_Printf("LORA", "[DEBUG] Linea RX: %s", line);
+#endif
+        return;
     }
+
+    Log_Printf("LORA", "Downlink recibido: %s", line);
 
     /* "+QEVT:<puerto>:<lenHex>:<payloadHex>" — se ignora el puerto y el
      * largo, el payload es todo lo que sigue del 2do ':' hasta el final
@@ -468,7 +502,6 @@ static void Lora_SimularMovimiento(void)
         g_exercise_data.longitud = SIM_GPS_LON_INICIAL;
 #endif
         ts_sim = HAL_GetTick() / 1000U;
-        srand(HAL_GetTick());
         inicializado = true;
     } else {
 #if !TASK_GPS_ENABLE
@@ -488,8 +521,11 @@ static void Lora_SimularMovimiento(void)
     g_exercise_data.timestamp = ts_sim;
 #endif
 
-    g_exercise_data.orientacion = (uint16_t)(rand() % 360);
-    g_exercise_data.pasos       = (uint16_t)(rand() % 2000);
+    /* orientacion y pasos: YA NO se simulan — Orientation_Update() y
+     * Steps_Update() en SensorsTask (magnetometro/acelerometro reales)
+     * llenan g_exercise_data.orientacion/pasos. orientacion sigue sin
+     * calibrar (ver Orientacion_e en Inicializacion.h), pendiente a
+     * proposito. */
 }
 
 /**
@@ -570,6 +606,11 @@ static void Lora_EnviarTelemetria(void)
 static void Lora_EnviarTestLora(void)
 {
     static const char testlora_msg[] = "TESTLORA";
+    /* Log solo la PRIMERA vez (2026-09-15, pedido del usuario) — se manda
+     * cada TESTLORA_PERIOD_MS mientras dure MODO_CONFIGURACION, imprimirlo
+     * cada vez ensuciaba el logger sin aportar nada nuevo. Si hace falta
+     * ver cada envio a detalle, usar Lora_DebugDump() (ver Lora.h). */
+    static bool primera_vez = true;
 
     char hex_payload[(sizeof(testlora_msg) * 2U) + 1U];
     Lora_EncodeToHex((const uint8_t *)testlora_msg, sizeof(testlora_msg) - 1U, hex_payload);
@@ -582,7 +623,10 @@ static void Lora_EnviarTestLora(void)
     }
 
     Lora_Transmit(&s_lora_task, (const uint8_t *)cmd, (uint16_t)cmd_len);
-    Log_Print("LORA", "TESTLORA enviado.");
+    if (primera_vez) {
+        Log_Print("LORA", "Iniciando envio periodico de TESTLORA (para leer cola de ChirpStack)...");
+        primera_vez = false;
+    }
 }
 
 /**
@@ -674,19 +718,11 @@ static void LoraTask(void *argument)
 {
     (void)argument;
 
-    /* Reporte de heap libre — primera linea de la primera tarea real que
-     * corre, ya con el scheduler vivo. NUNCA mover esto a antes de
-     * osKernelStart(). Vivia en GpsTask, se movio aqui porque GpsTask esta
-     * deshabilitada (TASK_GPS_ENABLE=0) mientras se prueba la tarjeta
-     * aislada de LoRa — LoraTask es ahora la primera tarea que arranca. */
-    Log_Printf("RTOS", "Heap libre tras crear tareas: %u bytes (de %u)",
-               (unsigned)xPortGetFreeHeapSize(), (unsigned)configTOTAL_HEAP_SIZE);
-    Log_Printf("RTOS", "Handles: calib=%s logger=%s bt=%s",
-               (calibrateTaskHandle  != NULL) ? "OK" : "NULL",
-               (loggerTaskHandle     != NULL) ? "OK" : "NULL",
-               (bluetoothTaskHandle  != NULL) ? "OK" : "NULL");
-
-    Log_Print("LORA", "LoraTask arrancada, esperando $CONF...");
+    /* Reporte de heap/handles y anuncio de arranque QUITADOS de aqui
+     * (2026-09-15) — ahora salen en el bloque consolidado de
+     * Tareas_CrearTareas(), impreso ANTES de osKernelStart() (deterministico,
+     * sin pelearse con el orden real en que el scheduler arranca cada
+     * tarea). */
 
     /* El bring-up de Inicializacion.c (Lora_Setup/Lora_Connect, si no esta
      * simulado) dejo el UART armado en modo IT — lo cancelamos limpio
@@ -768,6 +804,63 @@ static void LoraTask(void *argument)
     }
 }
 
+/**
+ * @brief  Calcula el heading (angulo respecto al norte magnetico) a partir
+ *         de la ultima lectura del magnetometro, y lo reduce a uno de los
+ *         8 sectores cardinales de Orientacion_e (ver Inicializacion.h).
+ *         Llenado en g_exercise_data.orientacion.
+ * @param  mag  Ultima lectura del MMC5983MA (ver MMC_Data_t).
+ * @note   PENDIENTE de afinar (2026-09-15, decidido con el usuario): no hay
+ *         calibracion de hard/soft-iron ni compensacion de tilt (la
+ *         calibracion que existe es con la tarjeta plana; el montaje real
+ *         va a ser vertical, pegado al pecho) ni correccion de declinacion
+ *         magnetica (heading magnetico, no geografico). Formula estandar
+ *         de brujula 2D: atan2(mag_y, mag_x) — asume la tarjeta plana
+ *         respecto al suelo, que es justo lo que va a dejar de ser cierto
+ *         en el montaje final. Se manda de todos modos para ver el
+ *         comportamiento en pruebas reales; el numero puede salir raro.
+ */
+static void Orientation_Update(const MMC_Data_t *mag)
+{
+    float heading_deg = atan2f(mag->y_uT, mag->x_uT) * (180.0f / 3.14159265f);
+    if (heading_deg < 0.0f) {
+        heading_deg += 360.0f;
+    }
+
+    uint16_t sector = (uint16_t)(((heading_deg + 22.5f) / 45.0f)) % 8U;
+    g_exercise_data.orientacion = sector;
+}
+
+/**
+ * @brief  Detector de pasos por histeresis sobre la magnitud del vector de
+ *         aceleracion. Llamar una vez por cada lectura nueva de IMU (cada
+ *         SENSORS_PERIOD_MS, ver SensorsTask) — NO es una funcion pura,
+ *         mantiene el estado del "armado" entre llamadas via static.
+ * @param  accel_mag_g  Magnitud del vector accel de la ultima lectura, en g.
+ * @note   Primer paso: solo el acelerometro (ver STEP_THRESHOLD_HIGH_G/LOW_G
+ *         arriba) — el usuario decidio dejar orientacion (magnetometro)
+ *         pendiente para despues, 2026-09-15. Umbrales sin validar todavia
+ *         con caminata real, ajustar una vez que se pruebe en persona.
+ */
+static void Steps_Update(float accel_mag_g)
+{
+    static bool     armado    = true;   /* true = listo para contar el siguiente pico */
+    static uint32_t last_tick = 0U;
+
+    uint32_t now = HAL_GetTick();
+
+    if (armado && accel_mag_g >= STEP_THRESHOLD_HIGH_G
+        && (now - last_tick) >= STEP_MIN_INTERVAL_MS) {
+        g_exercise_data.pasos++;
+        armado    = false;
+        last_tick = now;
+        Log_Printf("STEPS", "************** PASO detectado (|v|=%.3fg) — total=%u **************",
+                   (double)accel_mag_g, g_exercise_data.pasos);
+    } else if (!armado && accel_mag_g <= STEP_THRESHOLD_LOW_G) {
+        armado = true;
+    }
+}
+
 #if TASK_SENSORS_ENABLE
 /**
  * @brief  Tarea de lectura de sensores: cada SENSORS_PERIOD_MS lee luz,
@@ -781,10 +874,9 @@ static void SensorsTask(void *argument)
 {
     (void)argument;
 
-    /* Log ANTES de tocar el I2C — si esto nunca aparece, la tarea ni
-     * siquiera arranco (osThreadNew regreso NULL, heap insuficiente); si
-     * aparece pero "SensorsTask lista" no, se colgo dentro de Begin/Init. */
-    Log_Print("SENSORS", "SensorsTask arrancada, inicializando sensores...");
+    /* Anuncio de arranque QUITADO (2026-09-15, pedido del usuario) — ya
+     * sale en el bloque consolidado de Tareas_CrearTareas(), es repetitivo
+     * anunciarlo otra vez aqui. */
 
     /* NOTA: LSM6DSO32TR.c y MMC5983MA.c ya toman I2C1Bus_Lock()/Unlock()
      * ellos mismos en cada transaccion (ver LSM_WriteReg/LSM_ReadRegs y
@@ -810,45 +902,78 @@ static void SensorsTask(void *argument)
                    luz_ok ? "OK" : "FALLO", imu_ok ? "OK" : "FALLO");
     }
 
+    /* Prescaler de ciclos (2026-09-15) — NO se crea una tarea aparte para
+     * luz/bateria/magnetometro (el heap de FreeRTOS ya anda muy justo, ver
+     * "Heap libre tras crear tareas" en el log de arranque) ni un osTimer
+     * (tambien consume su propia tarea/stack de servicio). En vez de eso,
+     * un contador simple dentro del mismo ciclo de SensorsTask: el
+     * acelerometro (pasos) se lee SIEMPRE, cada SENSORS_PERIOD_MS, porque
+     * eso si necesita la cadencia rapida; luz/bateria/mag cambian lento y
+     * de momento no tienen consumidor urgente (mag es para orientacion,
+     * pendiente a proposito) asi que se leen cada N ciclos nada mas. */
+    static uint32_t s_sensors_cycle = 0U;
+    const uint32_t LUX_EVERY_N_CYCLES  = 50U;   /* ~5s a 100ms/ciclo   */
+    const uint32_t BAT_EVERY_N_CYCLES  = 50U;   /* ~5s a 100ms/ciclo   */
+    const uint32_t MAG_EVERY_N_CYCLES  = 10U;   /* ~1s a 100ms/ciclo   */
+
     for (;;) {
-        float lux = 0.0f;
-        TSL2571_RawData_t light_raw;
-        I2C1Bus_Lock();
-        HAL_StatusTypeDef lux_st = TSL2571_ReadLux(&s_light_task, 1U, 200U, &lux, &light_raw);
-        I2C1Bus_Unlock();
-        if (lux_st == HAL_OK) {
-            g_exercise_data.lux = lux;
+        s_sensors_cycle++;
+
+        if ((s_sensors_cycle % LUX_EVERY_N_CYCLES) == 0U) {
+            float lux = 0.0f;
+            TSL2571_RawData_t light_raw;
+            I2C1Bus_Lock();
+            HAL_StatusTypeDef lux_st = TSL2571_ReadLux(&s_light_task, 1U, 200U, &lux, &light_raw);
+            I2C1Bus_Unlock();
+            if (lux_st == HAL_OK) {
+                g_exercise_data.lux = lux;
+            }
         }
 
-        BatGauge_Data_t bat_data;
-        I2C1Bus_Lock();
-        BatGauge_Update(&bat_data);
-        I2C1Bus_Unlock();
-        if (bat_data.is_ready) {
-            g_exercise_data.bateria_ch = bat_data.soc_pct;   /* bateria de ESTA tarjeta */
+        if ((s_sensors_cycle % BAT_EVERY_N_CYCLES) == 0U) {
+            BatGauge_Data_t bat_data;
+            I2C1Bus_Lock();
+            BatGauge_Update(&bat_data);
+            I2C1Bus_Unlock();
+            if (bat_data.is_ready) {
+                g_exercise_data.bateria_ch = bat_data.soc_pct;   /* bateria de ESTA tarjeta */
+            }
         }
 
         LSM_Data_t imu_data;
-        if (LSM6DSO32TR_ReadAll(&s_imu_task, &imu_data) == LSM_OK) {
+        bool imu_read_ok = (LSM6DSO32TR_ReadAll(&s_imu_task, &imu_data) == LSM_OK);
+        if (imu_read_ok) {
             g_exercise_data.gyro_x_dps = imu_data.gx_dps;
             g_exercise_data.gyro_y_dps = imu_data.gy_dps;
             g_exercise_data.gyro_z_dps = imu_data.gz_dps;
         }
 
-        MMC_Data_t mag_data;
-        if (MMC5983MA_ReadAll(&mag_data) == MMC_OK) {
-            g_exercise_data.mag_x_uT = mag_data.x_uT;
-            g_exercise_data.mag_y_uT = mag_data.y_uT;
-            g_exercise_data.mag_z_uT = mag_data.z_uT;
+        bool mag_read_ok = false;
+        MMC_Data_t mag_data = {0};
+        if ((s_sensors_cycle % MAG_EVERY_N_CYCLES) == 0U) {
+            mag_read_ok = (MMC5983MA_ReadAll(&mag_data) == MMC_OK);
+            if (mag_read_ok) {
+                g_exercise_data.mag_x_uT = mag_data.x_uT;
+                g_exercise_data.mag_y_uT = mag_data.y_uT;
+                g_exercise_data.mag_z_uT = mag_data.z_uT;
+            }
         }
 
-        /* Detalle completo (bateria/lux/mag/gyro) comentado a proposito
-         * mientras se depura BLE+LoRa — ensuciaba mucho el logger. Solo se
-         * deja esta linea corta para confirmar que el ciclo si corrio.
-         * Descomentar Inicializacion_PrintSensorsData() cuando haga falta
-         * ver el detalle de sensores otra vez. */
-        // Inicializacion_PrintSensorsData();
-        Log_Print("SENSORS", "TASKSensores");
+        /* Logs de detalle (accel/gyro/mag crudos) QUITADOS a proposito
+         * (2026-09-15) — ya sirvieron para validar que los sensores dan
+         * lecturas coherentes, ahora solo ensuciaban el logger. El unico
+         * log que queda de este ciclo es el de Steps_Update() cuando
+         * detecta un paso (tag [STEPS], con los asteriscos). */
+        if (imu_read_ok) {
+            float accel_mag_g = sqrtf(imu_data.ax_g * imu_data.ax_g +
+                                       imu_data.ay_g * imu_data.ay_g +
+                                       imu_data.az_g * imu_data.az_g);
+            Steps_Update(accel_mag_g);
+        }
+
+        if (mag_read_ok) {
+            Orientation_Update(&mag_data);
+        }
 
         osDelay(SENSORS_PERIOD_MS);
     }
@@ -885,8 +1010,6 @@ static void SensorsTask(void *argument)
 static void CalibrateTask(void *argument)
 {
     (void)argument;
-
-    Log_Print("CALIB", "CalibrateTask arrancada.");
 
     for (;;) {
         if (IR_Process(&ir_handle) == IR_OK && ir_handle.frame_ready) {
@@ -1213,7 +1336,6 @@ static void BluetoothTask(void *argument)
     (void)argument;
 
     Bt_Init(&s_bt_task);
-    Log_Print("BT", "BluetoothTask arrancada.");
 
     s_bt_conectado  = false;
     s_ack_pendiente = ACK_NINGUNO;
@@ -1457,11 +1579,35 @@ void Tareas_CrearTareas(void)
     calibrateTaskHandle = osThreadNew(CalibrateTask, NULL, &calibrateTask_attributes);
     loggerTaskHandle  = osThreadNew(Log_Task, NULL, &loggerTask_attributes);
     bluetoothTaskHandle = osThreadNew(BluetoothTask, NULL, &bluetoothTask_attributes);
-    /* Si algun handle sale NULL (heap insuficiente), osThreadNew() no
-     * truena, solo regresa NULL — no hay forma segura de loggearlo aqui
-     * (scheduler todavia no corre, ver Tareas.h). Cuando haya mas de una
-     * tarea, la primera que si arranque puede revisar los handles de las
-     * demas y reportarlo. */
+
+    /* Bloque de arranque consolidado (2026-09-15, pedido del usuario) — se
+     * imprime AQUI a proposito, ANTES de osKernelStart(), no desde cada
+     * tarea por separado: en este punto solo corre un hilo (main, el
+     * scheduler todavia no arranca), asi que Log_Print()/Log_Printf() se
+     * encolan en orden garantizado, uno detras de otro, sin pelearse con
+     * el orden real (no determinista) en que el scheduler haria correr
+     * cada tarea. Log_InitQueue() ya corrio (Tareas_InicializarMutex(),
+     * antes que esta funcion) asi que encolar aqui es seguro — Log_Task
+     * drena la cola en cuanto el scheduler arranque, en este mismo orden. */
+    Log_Print("RTOS", "*********************************************");
+    Log_Print("RTOS", "Tareas iniciadas:");
+#if TASK_GPS_ENABLE
+    Log_Printf("RTOS", "  GpsTask       : %s - GPS L86-M33 (DMA+IDLE)", (gpsTaskHandle != NULL) ? "arrancada" : "ERROR (NULL)");
+#else
+    Log_Print("RTOS", "  GpsTask       : deshabilitada (TASK_GPS_ENABLE=0)");
+#endif
+    Log_Printf("RTOS", "  LoraTask      : %s - protocolo LoRa con el gateway", (loraTaskHandle != NULL) ? "arrancada" : "ERROR (NULL)");
+#if TASK_SENSORS_ENABLE
+    Log_Printf("RTOS", "  SensorsTask   : %s - IMU/magnetometro/luz/bateria, pasos+orientacion", (sensorsTaskHandle != NULL) ? "arrancada" : "ERROR (NULL)");
+#else
+    Log_Print("RTOS", "  SensorsTask   : deshabilitada (TASK_SENSORS_ENABLE=0)");
+#endif
+    Log_Printf("RTOS", "  CalibrateTask : %s - deteccion de disparos IR", (calibrateTaskHandle != NULL) ? "arrancada" : "ERROR (NULL)");
+    Log_Printf("RTOS", "  LoggerTask    : %s - consumidor de log por USB", (loggerTaskHandle != NULL) ? "arrancada" : "ERROR (NULL)");
+    Log_Printf("RTOS", "  BluetoothTask : %s - protocolo BLE con la Mira", (bluetoothTaskHandle != NULL) ? "arrancada" : "ERROR (NULL)");
+    Log_Printf("RTOS", "Heap libre: %u de %u bytes", (unsigned)xPortGetFreeHeapSize(), (unsigned)configTOTAL_HEAP_SIZE);
+    Log_Print("RTOS", "*********************************************");
+    Log_Blank();   /* separa el bloque de arranque del resto del log */
 }
 
 /* ======================  HAL WEAK CALLBACKS  =============================== */

@@ -98,6 +98,27 @@ typedef enum {
 
 extern ModoOperacion_e g_modo_operacion;
 
+/** @brief Codigo de orientacion cardinal (8 sectores de 45 grados) que se
+ *         manda en g_exercise_data.orientacion — lo calcula
+ *         Orientation_Update() en Tareas.c a partir del heading del
+ *         magnetometro (atan2 de mag_y/mag_x contra el norte magnetico).
+ * @note   2026-09-15: sin calibrar el magnetometro (ni hard/soft-iron, ni
+ *         compensacion de tilt si la tarjeta no esta plana, ni declinacion
+ *         magnetica) — el valor puede salir impreciso hasta que se pruebe
+ *         en la posicion real de montaje. Se deja puesto y mandando datos
+ *         reales a proposito para ver como se comporta en pruebas de
+ *         campo; el ajuste fino queda pendiente. */
+typedef enum {
+    ORIENT_N  = 0,
+    ORIENT_NE = 1,
+    ORIENT_E  = 2,
+    ORIENT_SE = 3,
+    ORIENT_S  = 4,
+    ORIENT_SW = 5,
+    ORIENT_W  = 6,
+    ORIENT_NW = 7,
+} Orientacion_e;
+
 /** @brief Datos del ejercicio/jugador — el "pizarron" compartido de todo el
  *         sistema, todo se escribe aqui:
  *         - Payload de config que llega por LoRa ($CONF<datos>, 9 campos:
@@ -154,8 +175,14 @@ typedef struct {
 
     /* Telemetria de vuelta al gateway por LoRa (los que faltaban de la
      * lista de arriba) — en 0 hasta que GPS/IMU los vayan llenando.
-     * "orientacion" y "pasos" salen del IMU/magnetometro de esta tarjeta
-     * (todavia no se calculan, solo el campo esta listo); "longitud"/
+     * "pasos" sale del acelerometro (Steps_Update() en Tareas.c);
+     * "orientacion" sale del magnetometro (Orientation_Update() en
+     * Tareas.c) como codigo de Orientacion_e (0-7), NO grados — sin
+     * calibrar el magnetometro todavia (ni compensacion de tilt, ni
+     * declinacion magnetica), asi que el valor puede salir raro/impreciso
+     * por ahora, decidido con el usuario dejarlo pendiente de afinar hasta
+     * probarlo en la posicion real de montaje (vertical, pegado al pecho —
+     * la calibracion que hay es con la tarjeta plana). "longitud"/
      * "latitud"/"altitud" salen de GpsTask cuando haya fix. */
     float    longitud;
     float    latitud;
