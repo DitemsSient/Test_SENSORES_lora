@@ -51,8 +51,11 @@ extern "C" {
  * si fuera la primera conexion. */
 #define BT_ACKCON_TIMEOUT_MS    60000U  /**< Timeout esperando ACKCON tras mandar $CON<mac> */
 
-#define BT_ACKCONF_TIMEOUT_MS   30000U  /**< Timeout esperando ACKCONF tras mandar $CONF<datos> (por intento — hay 1 reintento, ver BT_ACKCONF_REINTENTOS) */
-#define BT_ACKCONF_REINTENTOS       1U  /**< Cuantas veces se reenvia $CONF si no llego ACKCONF antes de rendirse */
+/* Un solo intento — el reintento (reenviar $CONF si no llega ACKCONF) se
+ * quito a proposito (2026-09-15, decision del usuario): caso raro, no
+ * vale la pena la complejidad extra por ahora. Si no llega a tiempo, se
+ * avisa al gateway con ack=BT_GW_ACK_SIN_ACKCONF y se sigue sin mas. */
+#define BT_ACKCONF_TIMEOUT_MS   30000U  /**< Timeout esperando ACKCONF tras mandar $CONF<datos> */
 
 /* El modulo BL654 (SensoresM.sb) ya reintenta la conexion BLE solo tras un
  * corte breve de RF (TimerStart(2, RETRY_DELAY_MS=500, 0) en su propio

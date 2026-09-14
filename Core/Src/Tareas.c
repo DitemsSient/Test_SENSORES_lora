@@ -1192,11 +1192,11 @@ static void BT_HandleEndA(void)
  *         igual que la primera conexion).
  *         Si SI llega ACKCON: azul fijo (enlazados) -> espera "READY" ->
  *         $CONF<datos> (solo mac1, mac2 no se manda) -> espera "ACKCONF"
- *         hasta BT_ACKCONF_TIMEOUT_MS, con BT_ACKCONF_REINTENTOS
- *         reintentos (reenvia $CONF) antes de rendirse -> loop de escucha
- *         para siempre. Si nunca llega ACKCONF ni con el reintento: se
- *         avisa al gateway con ack=BT_GW_ACK_SIN_ACKCONF, sin ninguna
- *         accion extra a proposito (ver su doc comment en Bluetooth.h).
+ *         hasta BT_ACKCONF_TIMEOUT_MS, un solo intento (sin reintentar el
+ *         envio, decision del usuario 2026-09-15: caso raro) -> loop de
+ *         escucha para siempre. Si nunca llega ACKCONF: se avisa al
+ *         gateway con ack=BT_GW_ACK_SIN_ACKCONF, sin ninguna accion extra
+ *         a proposito (ver su doc comment en Bluetooth.h).
  *         "$DSCON" se atiende SIEMPRE, en cualquier punto de la secuencia
  *         (ver BT_HandleDSCON()) — espera BT_DSCON_RECONNECT_WINDOW_MS
  *         (5s) a ver si el modulo se reconecta solo (SensoresM.sb ya
@@ -1320,62 +1320,53 @@ retomar_ready:
     osDelay(150U);
 
     /* $CONF<datos>\r — homogeneo con lo que Mira espera: 8 campos, solo la
-     * primera MAC (mac2 se guarda pero no se manda). Se manda hasta
-     * (1 + BT_ACKCONF_REINTENTOS) veces si no llega ACKCONF a tiempo —
-     * BT_ACKCONF_TIMEOUT_MS (30s) por intento. */
-    bool ackconf_ok = false;
-    for (uint8_t intento = 0U; intento <= BT_ACKCONF_REINTENTOS; intento++) {
-        char    payload[160];
-        int32_t n = snprintf(payload, sizeof(payload), "$CONF%u,%u,%s,%s,%u,%u,%lu,%s\r",
-                              g_exercise_data.orden, g_exercise_data.lora,
-                              g_exercise_data.team_name, g_exercise_data.player_name,
-                              g_exercise_data.lives, g_exercise_data.ammo,
-                              (unsigned long)g_exercise_data.tiempo, g_exercise_data.mac);
+     * primera MAC (mac2 se guarda pero no se manda). Un solo intento — el
+     * reintento (reenviar $CONF si no llega ACKCONF) se quito a proposito
+     * (2026-09-15, decision del usuario): caso raro, no vale la pena la
+     * complejidad extra por ahora. */
+    char    payload[160];
+    int32_t n = snprintf(payload, sizeof(payload), "$CONF%u,%u,%s,%s,%u,%u,%lu,%s\r",
+                          g_exercise_data.orden, g_exercise_data.lora,
+                          g_exercise_data.team_name, g_exercise_data.player_name,
+                          g_exercise_data.lives, g_exercise_data.ammo,
+                          (unsigned long)g_exercise_data.tiempo, g_exercise_data.mac);
 
-        if (n > 0 && (size_t)n < sizeof(payload)) {
-            Bt_Transmit(&s_bt_task, (uint8_t *)payload, (uint16_t)n);
-            Log_Printf("BT", "CONF enviado (intento %u/%u), esperando ACKCONF...",
-                       (unsigned)(intento + 1U), (unsigned)(BT_ACKCONF_REINTENTOS + 1U));
-        } else {
-            Log_Print("BT", "ERROR: payload de CONF demasiado grande.");
-        }
-
-        s_ack_pendiente = ACK_CONF;
-        uint32_t ackconf_start = HAL_GetTick();
-        while (s_ack_pendiente == ACK_CONF && (HAL_GetTick() - ackconf_start) < BT_ACKCONF_TIMEOUT_MS) {
-            if (s_bt_task.rx_ready) {
-                if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
-                    Bt_ResetRx(&s_bt_task);
-                    if (BT_HandleDSCON()) {
-                        goto retomar_ready;
-                    }
-                }
-                if (strncmp((char *)s_bt_task.rx_buffer, "ACKCONF", 7U) == 0) {
-                    s_ack_pendiente = ACK_NINGUNO;
-                } else {
-                    Log_Printf("BT", "RX no reconocido esperando ACKCONF: %s", (char *)s_bt_task.rx_buffer);
-                }
-                Bt_ResetRx(&s_bt_task);
-            }
-            osDelay(20U);
-        }
-
-        if (s_ack_pendiente == ACK_NINGUNO) {
-            ackconf_ok = true;
-            break;
-        }
-        s_ack_pendiente = ACK_NINGUNO;
-        Log_Print("BT", "ERROR: no llego ACKCONF a tiempo.");
+    if (n > 0 && (size_t)n < sizeof(payload)) {
+        Bt_Transmit(&s_bt_task, (uint8_t *)payload, (uint16_t)n);
+        Log_Print("BT", "CONF enviado, esperando ACKCONF...");
+    } else {
+        Log_Print("BT", "ERROR: payload de CONF demasiado grande.");
     }
 
-    if (ackconf_ok) {
+    s_ack_pendiente = ACK_CONF;
+    uint32_t ackconf_start = HAL_GetTick();
+    while (s_ack_pendiente == ACK_CONF && (HAL_GetTick() - ackconf_start) < BT_ACKCONF_TIMEOUT_MS) {
+        if (s_bt_task.rx_ready) {
+            if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
+                Bt_ResetRx(&s_bt_task);
+                if (BT_HandleDSCON()) {
+                    goto retomar_ready;
+                }
+            }
+            if (strncmp((char *)s_bt_task.rx_buffer, "ACKCONF", 7U) == 0) {
+                s_ack_pendiente = ACK_NINGUNO;
+            } else {
+                Log_Printf("BT", "RX no reconocido esperando ACKCONF: %s", (char *)s_bt_task.rx_buffer);
+            }
+            Bt_ResetRx(&s_bt_task);
+        }
+        osDelay(20U);
+    }
+
+    if (s_ack_pendiente == ACK_NINGUNO) {
         Log_Print("BT", "ACKCONF recibido.");
         /* Senal para LoraTask: ya se confirmo el CONF con Mira, toca
          * mandar la telemetria de vuelta al gateway con este estado. */
         g_exercise_data.ack   = (uint8_t)BT_GW_ACK_CONFIRMADO;
         s_lora_enviar_telemetria = true;
     } else {
-        Log_Print("BT", "ERROR: no llego ACKCONF ni con el reintento — se avisa al gateway.");
+        s_ack_pendiente = ACK_NINGUNO;
+        Log_Print("BT", "ERROR: no llego ACKCONF a tiempo — se avisa al gateway.");
         g_exercise_data.ack   = (uint8_t)BT_GW_ACK_SIN_ACKCONF;
         s_lora_enviar_telemetria = true;
         /* TODO: pendiente de definir el comando de desconexion BLE +
