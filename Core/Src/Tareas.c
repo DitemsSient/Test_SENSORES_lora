@@ -200,14 +200,10 @@ static volatile bool s_lora_run_recibido = false;
 static volatile bool s_lora_end_s_recibido = false;
 
 /* CalibrateTask marca esta bandera cuando un impacto real valido deja las
- * vidas en 0 — LoraTask la revisa para mandar $END_M al gateway y correr
- * Lora_ManejarFinPorVidas() (ver ahi). Mismo patron volatile de siempre. */
+ * vidas en 0 — BluetoothTask la revisa para mandar $END_M a la MIRA (no al
+ * gateway, ver BT_HandleFinPorVidas()) y correr esa secuencia. Mismo
+ * patron volatile de siempre. */
 static volatile bool s_vidas_agotadas = false;
-
-/* LoraTask (dentro de Lora_ManejarFinPorVidas()) la marca en false antes
- * de mandar $END_M y espera a que Lora_ProcesarLinea() la ponga en true al
- * ver "ACKEND_M" — mismo patron que las demas banderas de ack por LoRa. */
-static volatile bool s_lora_ackend_m_recibido = false;
 
 /* Cola circular de atacantes pendientes de reportar — CalibrateTask
  * escribe (productor, un disparo valido a la vez), LoraTask lee/consume
@@ -378,7 +374,6 @@ static void Lora_ProcesarLinea(const char *line)
     char *conf_pos     = strstr(decoded_str, "CONF");
     char *run_pos      = strstr(decoded_str, "RUN");
     char *end_s_pos    = strstr(decoded_str, "END_S");
-    char *ackend_m_pos = strstr(decoded_str, "ACKEND_M");   /* respuesta a NUESTRO $END_M, ver Lora_ManejarFinPorVidas() */
 
     if (conf_pos != NULL) {
         const char *contenido = conf_pos + 4;
@@ -427,14 +422,8 @@ static void Lora_ProcesarLinea(const char *line)
          * BluetoothTask). Solo se avisa. */
         Log_Print("LORA", "END_S recibido — avisando a BluetoothTask para mandar $END_S a la Mira.");
         s_lora_end_s_recibido = true;
-    } else if (ackend_m_pos != NULL) {
-        /* Respuesta a nuestro propio $END_M (ver Lora_ManejarFinPorVidas(),
-         * que es quien esta esperando esto en su propio loop bloqueante) —
-         * solo se marca la bandera, el manejo real vive alla. */
-        Log_Print("LORA", "ACKEND_M recibido.");
-        s_lora_ackend_m_recibido = true;
     } else {
-        Log_Printf("LORA", "Payload de +QEVT sin CONF/RUN/END_S/ACKEND_M reconocido: %s", decoded_str);
+        Log_Printf("LORA", "Payload de +QEVT sin CONF/RUN/END_S reconocido: %s", decoded_str);
     }
 }
 
@@ -641,66 +630,11 @@ static void Lora_EnviarTestLora(void)
     }
 }
 
-/**
- * @brief  Manda "END_M" (texto plano, codificado a hex sobre AT+QSEND, sin
- *         framing $/*** — igual que TESTLORA, ya no hace falta desde el
- *         rewrite a lineas +QEVT). Avisa al gateway que este jugador se
- *         quedo sin vidas.
- */
-static void Lora_EnviarEndM(void)
-{
-    static const char end_m_msg[] = "END_M";
-
-    char hex_payload[(sizeof(end_m_msg) * 2U) + 1U];
-    Lora_EncodeToHex((const uint8_t *)end_m_msg, sizeof(end_m_msg) - 1U, hex_payload);
-
-    char cmd[sizeof(hex_payload) + 16U];
-    int  cmd_len = snprintf(cmd, sizeof(cmd), "AT+QSEND=1:1:%s\r\n", hex_payload);
-    if (cmd_len <= 0 || (size_t)cmd_len >= sizeof(cmd)) {
-        Log_Print("LORA", "ERROR: comando AT+QSEND de END_M demasiado grande.");
-        return;
-    }
-
-    Lora_Transmit(&s_lora_task, (const uint8_t *)cmd, (uint16_t)cmd_len);
-    Log_Print("LORA", "END_M enviado (nos quedamos sin vidas).");
-}
-
-/**
- * @brief  Fin de ejercicio POR NOSOTROS (vidas en 0, a diferencia de
- *         $END_S que lo ordena el administrador): manda "END_M" al
- *         gateway y espera "ACKEND_M" (sin timeout — mismo criterio que
- *         ACKRUN/ACKEND_S, el gateway ya sabe que nos quedamos sin vidas,
- *         no tiene caso abandonar la espera). Mientras espera, sigue
- *         drenando y procesando cualquier otra linea que llegue (igual que
- *         el loop principal de LoraTask). Al confirmarse:
- *         manda la telemetria final (datos ya actualizados: vidas=0,
- *         ultima posicion, etc.), regresa a MODO_CONFIGURACION, y hace el
- *         mismo parpadeo colorido de fin de juego que BT_HandleEndA()
- *         (Leds_ParpadeoFinJuego()).
- * @note   Llamada desde el loop principal de LoraTask cuando CalibrateTask
- *         marca s_vidas_agotadas — ver ahi.
- */
-static void Lora_ManejarFinPorVidas(void)
-{
-    s_lora_ackend_m_recibido = false;
-    Lora_EnviarEndM();
-
-    char linea[LORA_LINE_MAX_LEN];
-    while (!s_lora_ackend_m_recibido) {
-        while (Lora_PopLine(&s_lora_task, linea, sizeof(linea))) {
-            Lora_ProcesarLinea(linea);
-        }
-        osDelay(20U);
-    }
-
-    Log_Print("LORA", "ACKEND_M confirmado — mandando telemetria final.");
-    Lora_EnviarTelemetria();
-
-    Modo_SetOperacion(MODO_CONFIGURACION);
-    Log_Print("LORA", "MODO_CONFIGURACION activo — nos quedamos sin vidas, ejercicio terminado.");
-
-    Leds_ParpadeoFinJuego();
-}
+/* Lora_EnviarEndM()/Lora_ManejarFinPorVidas() (mandaban END_M al GATEWAY
+ * por LoRa) QUITADAS 2026-09-15 — estaban mal desde el diseno original:
+ * $END_M es un mensaje Bluetooth a la MIRA (que ya tiene su handler listo
+ * del otro lado), no algo que le importe al gateway. Ver BT_HandleFinPorVidas()
+ * mas abajo, la version correcta. */
 
 /**
  * @brief  Tarea de LoRa: recepcion por DMA circular + linea IDLE (mismo
@@ -716,11 +650,9 @@ static void Lora_ManejarFinPorVidas(void)
  *         g_exercise_data + marca s_lora_conf_listo (arranca BluetoothTask);
  *         "RUN" -> avisa a BluetoothTask (s_lora_run_recibido); "END_S" ->
  *         avisa a BluetoothTask (s_lora_end_s_recibido, fin de ejercicio
- *         por orden del administrador); "ACKEND_M" -> marca
- *         s_lora_ackend_m_recibido (respuesta a nuestro propio "END_M", ver
- *         Lora_ManejarFinPorVidas() — fin de ejercicio porque a NOSOTROS se
- *         nos acabaron las vidas, disparado por CalibrateTask via
- *         s_vidas_agotadas, mas abajo en este mismo loop).
+ *         por orden del administrador). El fin de ejercicio por vidas
+ *         agotadas ($END_M) NO pasa por aqui — es un mensaje Bluetooth
+ *         directo a la Mira, ver BT_HandleFinPorVidas() en BluetoothTask.
  * @note   La telemetria de 12 campos (Lora_EnviarTelemetria()) se manda en
  *         dos casos: una vez cuando BluetoothTask marca
  *         s_lora_enviar_telemetria (tras ACKCONF), y periodica cada
@@ -805,11 +737,6 @@ static void LoraTask(void *argument)
              * TESTLORA_PERIOD_MS completo, no pegado a este envio. */
             s_lora_testlora_pausado = false;
             last_testlora_tx = HAL_GetTick();
-        }
-
-        if (s_vidas_agotadas) {
-            s_vidas_agotadas = false;
-            Lora_ManejarFinPorVidas();
         }
 
         osDelay(50U);
@@ -1025,8 +952,8 @@ static void SensorsTask(void *argument)
  *             ver ATACANTE_REPORT_PERIOD_MS). Si el checksum no cuadra, se
  *             descarta (log de todos modos, para depurar). Si tras esto
  *             las vidas ya estan en 0, se marca s_vidas_agotadas para que
- *             LoraTask mande $END_M al gateway (ver
- *             Lora_ManejarFinPorVidas()).
+ *             BluetoothTask mande $END_M a la Mira (ver
+ *             BT_HandleFinPorVidas()).
  */
 static void CalibrateTask(void *argument)
 {
@@ -1328,6 +1255,57 @@ static void BT_HandleEndA(void)
 }
 
 /**
+ * @brief  Maneja el fin de ejercicio POR NOSOTROS (vidas en 0, a
+ *         diferencia de $END_S que lo ordena el administrador via LoRa):
+ *         manda "$END_M\r" a la MIRA por Bluetooth (la Mira ya tiene su
+ *         propio handler listo del otro lado) y espera "$ACKEND_M" — SIN
+ *         timeout, mismo criterio que ACKRUN/ACKEND_S. Al confirmarse:
+ *         manda la telemetria final por LoRa (datos ya actualizados:
+ *         vidas=0, ultima posicion, etc.), hace el parpadeo de fin de
+ *         juego (Leds_ParpadeoFinJuego()) y regresa a MODO_CONFIGURACION.
+ * @note   2026-09-15: ANTES esto se mandaba mal, por LoRa al gateway (el
+ *         gateway nunca le importo esto, y la Mira nunca se enteraba de
+ *         que el ejercicio habia terminado de nuestro lado) — corregido
+ *         tras confirmar con el usuario que la Mira YA tiene su propio
+ *         handler de $END_M/$ACKEND_M listo, igual que $END_S.
+ * @note   Llamada desde el loop de escucha de BluetoothTask cuando
+ *         CalibrateTask marca s_vidas_agotadas — ver ahi.
+ */
+static void BT_HandleFinPorVidas(void)
+{
+    static const uint8_t end_m_msg[] = "$END_M\r";
+    Bt_Transmit(&s_bt_task, end_m_msg, sizeof(end_m_msg) - 1U);
+    Log_Print("BT", "END_M enviado a la Mira (nos quedamos sin vidas), esperando ACKEND_M...");
+
+    for (;;) {
+        if (s_bt_task.rx_ready) {
+            if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
+                Bt_ResetRx(&s_bt_task);
+                /* Mismo caso que en BT_HandleRun()/BT_HandleEndS() — TODO:
+                 * reintento completo del handshake pendiente para este caso. */
+                (void)BT_HandleDSCON();
+                continue;
+            }
+            if (strcmp((char *)s_bt_task.rx_buffer, "ACKEND_M") == 0) {
+                Bt_ResetRx(&s_bt_task);
+                break;
+            }
+            Log_Printf("BT", "Esperaba ACKEND_M, llego: %s", (char *)s_bt_task.rx_buffer);
+            Bt_ResetRx(&s_bt_task);
+        }
+        osDelay(20U);
+    }
+
+    Log_Print("BT", "ACKEND_M confirmado — mandando telemetria final por LoRa.");
+    Lora_EnviarTelemetria();
+
+    Leds_ParpadeoFinJuego();
+
+    Modo_SetOperacion(MODO_CONFIGURACION);
+    Log_Print("BT", "MODO_CONFIGURACION activo — nos quedamos sin vidas, ejercicio terminado.");
+}
+
+/**
  * @brief  Tarea de Bluetooth: enlace inicial con Mira, protocolo $...\r.
  * @note   Secuencia (actualizada 2026-09-15):
  *         retomar_inicio: espera s_lora_conf_listo (LoraTask ya recibio y
@@ -1539,6 +1517,11 @@ retomar_ready:
         if (s_lora_end_s_recibido) {
             s_lora_end_s_recibido = false;
             BT_HandleEndS();
+        }
+
+        if (s_vidas_agotadas) {
+            s_vidas_agotadas = false;
+            BT_HandleFinPorVidas();
         }
 
         if (s_bt_task.rx_ready) {
