@@ -260,13 +260,16 @@ void Lora_StoreBytes(Lora_Handle_t *h, const uint8_t *data, uint16_t len)
     for (uint16_t i = 0U; i < len; i++) {
         char c = (char)data[i];
 
-        if (c == '\n') {
-            /* Recorta el '\r' final si vino (protocolo de lineas AT tipico,
-             * "\r\n"). */
-            if ((h->line_len_cur > 0U) &&
-                (h->line_queue[h->line_queue_head][h->line_len_cur - 1U] == '\r')) {
-                h->line_len_cur--;
-            }
+        if (c == '\n' || c == '\r') {
+            /* 2026-09-15: antes solo '\n' cerraba la linea — si quien manda
+             * solo manda '\r' (varias terminales, incluido TeraTerm segun
+             * su config de "New-line: Transmit"), la linea se quedaba
+             * pegada para siempre en el buffer y JAMAS se procesaba, aunque
+             * los bytes si llegaran por UART. Ahora cualquiera de los dos
+             * cierra la linea — con "\r\n" real (modulo/AT tipico) el '\r'
+             * cierra la linea y el '\n' que sigue llega con
+             * line_len_cur==0, se descarta como linea vacia (ver abajo),
+             * mismo resultado que antes. */
             h->line_queue[h->line_queue_head][h->line_len_cur] = '\0';
 
             if (h->line_len_cur > 0U) {   /* descarta lineas vacias ("\r\n" solo) */
