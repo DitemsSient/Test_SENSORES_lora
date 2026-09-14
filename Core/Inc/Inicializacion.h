@@ -164,10 +164,13 @@ typedef struct {
     uint8_t  bateria_ch;         /**< Bateria de ESTA tarjeta (chaleco) — la llena SensorsTask, es la que se manda por LoRa */
     uint8_t  bateria_ap;         /**< Bateria de la Mira (apuntador) — la llena BluetoothTask via $A_AP, se manda como campo 13 del CSV */
 
-    /* Numero/canal LoRa de quien nos disparo (agregado 2026-09-15) — es
-     * el "dato" de 16 bits que llega por IR, truncado a 8 bits. La llena
+    /* Numero/canal LoRa de quien nos disparo (agregado 2026-09-15, campo
+     * corregido el mismo dia tras confirmar el protocolo IR real con el
+     * codigo de la Mira, Transmision_Laser_IR.c) — es el byte "lora" de
+     * la trama IR de 3 bytes que manda el gatillo (orden,lora,checksum
+     * XOR de orden^lora), ya de 8 bits, sin truncar nada. La llena
      * CalibrateTask via la cola s_atacante_buffer (Tareas.c) cada vez que
-     * un disparo real (MODO_EJERCICIO) resulta valido (dato == ash);
+     * un disparo real (MODO_EJERCICIO) resulta valido (checksum cuadra);
      * LoraTask va sacando uno de la cola por cada telemetria que manda.
      * 0 = nadie nos ataco en ese envio especifico (la cola estaba vacia
      * en ese momento) — NO significa "atacante numero 0". */
