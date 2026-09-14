@@ -59,12 +59,20 @@ extern "C" {
 #define IR_TSOP_PIN              GPIO_PIN_0
 
 /* Umbrales de clasificacion del ancho de SPACE, en microsegundos.
- * Validados contra un transmisor real ("A#" cada 3 s): cortos ~350-450us
- * (bit 0), medianos ~700-900us (bit 1), separador ~1150-1600us. Deja
- * margen entre bandas para tolerar jitter del transmisor y de la ISR. */
+ * Ajustados 2026-09-15 con los timings REALES confirmados directo del
+ * codigo del gatillo de la Mira (Transmision_Laser_IR.c, Tx_IR_SendFrame):
+ * SPACE0(bit 0)=400us, SPACE1(bit 1)=800us, INTER(separador entre bytes)
+ * =1200us, SYNC(inicio/fin de trama)=1600us — exactos, no aproximados.
+ * Los umbrales viejos (500/900) dejaban solo ~100us de margen contra esos
+ * valores reales (justo 900 vs SPACE1=800 practicamente sin colchon), y en
+ * pruebas reales se veian bits sueltos mal clasificados (ej. lora=0x01
+ * decodificado como 0x05 o 0x0F — un solo bit volteado) sin que el disparo
+ * fuera invalido por timing/interferencia real, solo por margen apretado.
+ * Ahora centrados a la mitad de cada hueco real (400<->800 y 800<->1200),
+ * dejando ~200us de colchon de cada lado en vez de ~100us. */
 
-#define IR_BIT0_MAX_US           500U     /**< SPACE < esto        -> bit 0 */
-#define IR_BIT1_MAX_US           900U     /**< 500 <= SPACE < esto -> bit 1 */
+#define IR_BIT0_MAX_US           600U     /**< SPACE < esto        -> bit 0 */
+#define IR_BIT1_MAX_US          1000U     /**< 600 <= SPACE < esto -> bit 1 */
                                             /**< SPACE >= IR_BIT1_MAX_US -> separador */
 
 /* Tiempo sin ningun flanco nuevo que se interpreta como "trama terminada" */
