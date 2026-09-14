@@ -105,17 +105,18 @@ extern ModoOperacion_e g_modo_operacion;
  *           CODIGO_LORA de referencia) y que se retransmite a Mira por
  *           Bluetooth (mismo protocolo $CONF<datos>, 8 campos: solo mac1,
  *           mac2 no se manda).
- *         - Telemetria de vuelta al gateway por LoRa (13 campos:
+ *         - Telemetria de vuelta al gateway por LoRa (14 campos:
  *           ID,numOrden,vidas,municion,bateria,latitud,longitud,altitud,
- *           orientacion,pasos,ack,timestamp,bateria_ap — latitud ANTES
- *           que longitud, asi lo manda de verdad generarCadena() del
- *           codigo de referencia del companero (CODIGO_LORA/lora_kg200z.c),
- *           aunque su propio comentario diga lo contrario. bateria_ap se
- *           agrego al final (campo 13) el 2026-09-15, sin correr de lugar
- *           ningun campo existente. Reusa los mismos orden/lora/lives/
- *           ammo/bateria_ch de arriba. El "ack" de esta telemetria es el
- *           codigo de BtGatewayAck_e (ver Bluetooth.h), no un simple
- *           si/no.
+ *           orientacion,pasos,ack,timestamp,bateria_ap,
+ *           atacante_numero_lora — latitud ANTES que longitud, asi lo
+ *           manda de verdad generarCadena() del codigo de referencia del
+ *           companero (CODIGO_LORA/lora_kg200z.c), aunque su propio
+ *           comentario diga lo contrario. bateria_ap y
+ *           atacante_numero_lora se agregaron al final (campos 13 y 14)
+ *           el 2026-09-15, sin correr de lugar ningun campo existente.
+ *           Reusa los mismos orden/lora/lives/ammo/bateria_ch de arriba.
+ *           El "ack" de esta telemetria es el codigo de BtGatewayAck_e
+ *           (ver Bluetooth.h), no un simple si/no.
  *         - $A_AP<balas>,<pct_bateria>\r que manda Mira por Bluetooth cada
  *           200ms (solo si cambio algo) — actualiza ammo y bateria_ap.
  *         - Lecturas de sensores que llena SensorsTask cada ciclo.
@@ -142,9 +143,13 @@ typedef struct {
     uint8_t  bateria_ch;         /**< Bateria de ESTA tarjeta (chaleco) — la llena SensorsTask, es la que se manda por LoRa */
     uint8_t  bateria_ap;         /**< Bateria de la Mira (apuntador) — la llena BluetoothTask via $A_AP, se manda como campo 13 del CSV */
 
-    /* [PRUEBA] Numero/canal LoRa de quien nos disparo — agregado
-     * 2026-09-15, todavia sin llenar (el usuario explica el mecanismo
-     * despues). Deja el campo listo en la estructura mientras tanto. */
+    /* Numero/canal LoRa de quien nos disparo (agregado 2026-09-15) — es
+     * el "dato" de 16 bits que llega por IR, truncado a 8 bits. La llena
+     * CalibrateTask via la cola s_atacante_buffer (Tareas.c) cada vez que
+     * un disparo real (MODO_EJERCICIO) resulta valido (dato == ash);
+     * LoraTask va sacando uno de la cola por cada telemetria que manda.
+     * 0 = nadie nos ataco en ese envio especifico (la cola estaba vacia
+     * en ese momento) — NO significa "atacante numero 0". */
     uint8_t  atacante_numero_lora;
 
     /* Telemetria de vuelta al gateway por LoRa (los que faltaban de la

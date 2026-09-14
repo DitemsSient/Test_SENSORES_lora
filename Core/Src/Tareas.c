@@ -47,6 +47,13 @@ extern Ir_Handle_t ir_handle;
 
 #define LORA_DMA_BUF_SIZE    256U
 #define LORA_EXERCISE_PERIOD_MS 10000U /**< Cada cuanto se manda telemetria completa en MODO_EJERCICIO */
+
+/* Cola de atacantes pendientes de reportar (ver s_atacante_buffer mas
+ * abajo) — mientras haya alguno pendiente, la telemetria sale cada
+ * ATACANTE_REPORT_PERIOD_MS (2s) en vez de LORA_EXERCISE_PERIOD_MS (10s),
+ * para vaciar la cola mas rapido sin tener que mandar un frame aparte. */
+#define ATACANTE_BUFFER_MAX       50U
+#define ATACANTE_REPORT_PERIOD_MS 2000U
 /* LoRaWAN Clase A (AT+QCLASS=A): solo se puede recibir downlink justo
  * despues de mandar un uplink — el gateway no puede "empujar" nada, tiene
  * que esperar a que nosotros transmitamos. Por eso TESTLORA funciona como
@@ -179,6 +186,18 @@ static volatile bool s_vidas_agotadas = false;
  * de mandar $END_M y espera a que Lora_ProcesarLinea() la ponga en true al
  * ver "ACKEND_M" — mismo patron que las demas banderas de ack por LoRa. */
 static volatile bool s_lora_ackend_m_recibido = false;
+
+/* Cola circular de atacantes pendientes de reportar — CalibrateTask
+ * escribe (productor, un disparo valido a la vez), LoraTask lee/consume
+ * (consumidor, uno por cada telemetria que manda). Mismo patron que la
+ * cola de lineas de Lora_StoreBytes()/Lora_PopLine(): un solo escritor, un
+ * solo lector, sin mutex. Si se llena (50 pendientes sin mandar), los
+ * disparos nuevos se descartan — mejor perder el reporte de uno viejo que
+ * trabarse esperando espacio. */
+static uint8_t s_atacante_buffer[ATACANTE_BUFFER_MAX];
+static uint8_t s_atacante_head  = 0U;   /**< Proximo indice a escribir (CalibrateTask) */
+static uint8_t s_atacante_tail  = 0U;   /**< Proximo indice a leer (LoraTask)           */
+static uint8_t s_atacante_count = 0U;   /**< Cuantos atacantes hay pendientes de mandar */
 
 /* Handle de Bluetooth propio de esta tarea — separado del que usa el
  * smoke test de Inicializacion.c, mismo patron que GPS/Sensores. NO
@@ -418,12 +437,18 @@ static void Lora_SimularMovimiento(void)
 }
 
 /**
- * @brief  Manda la telemetria de 13 campos de vuelta al gateway
+ * @brief  Manda la telemetria de 14 campos de vuelta al gateway
  *         (ID,numOrden,vidas,municion,bateria,latitud,longitud,altitud,
- *         orientacion,pasos,ack,timestamp,bateria_ap — latitud ANTES que
- *         longitud, bateria_ap agregada al final el 2026-09-15, ver
- *         g_exercise_data), codificada a hex sobre AT+QSEND=1:1:<hex>\r\n
- *         (igual que mandarPorLora() del codigo de referencia).
+ *         orientacion,pasos,ack,timestamp,bateria_ap,atacante_numero_lora
+ *         — latitud ANTES que longitud, bateria_ap y atacante_numero_lora
+ *         agregados al final el 2026-09-15, ver g_exercise_data),
+ *         codificada a hex sobre AT+QSEND=1:1:<hex>\r\n (igual que
+ *         mandarPorLora() del codigo de referencia).
+ * @note   atacante_numero_lora: 0 significa "nadie nos ataco en este
+ *         envio" — si hay atacantes pendientes en s_atacante_buffer, aqui
+ *         viene el numero/canal LoRa de UNO de ellos (uno por envio, ver
+ *         LoraTask). Con la cola llena la telemetria se manda cada
+ *         ATACANTE_REPORT_PERIOD_MS en vez de LORA_EXERCISE_PERIOD_MS.
  * @note   El modulo LoRa no confirma nada por su cuenta — solo manda la
  *         trama y ya, no hay "SEND_CONFIRMED" que esperar. (Antes si se
  *         esperaba, bloqueando LoraTask hasta 10s cada vez porque ese
@@ -441,9 +466,10 @@ static void Lora_EnviarTelemetria(void)
      * generarCadena() del codigo de referencia del companero (CODIGO_LORA/
      * lora_kg200z.c), aunque su propio comentario diga "longitud,latitud"
      * (comentario desactualizado, el codigo real pasa latStr primero).
-     * bateria_ap se agrega al final (campo 13, 2026-09-15) — el resto de
-     * los 12 campos originales no cambia de lugar. */
-    int  n = snprintf(csv, sizeof(csv), "%u,%u,%u,%u,%u,%.5f,%.5f,%.1f,%u,%u,%u,%lu,%u",
+     * bateria_ap y atacante_numero_lora se agregan al final (campos 13 y
+     * 14, 2026-09-15) — el resto de los 12 campos originales no cambia de
+     * lugar. */
+    int  n = snprintf(csv, sizeof(csv), "%u,%u,%u,%u,%u,%.5f,%.5f,%.1f,%u,%u,%u,%lu,%u,%u",
                        g_exercise_data.lora, g_exercise_data.orden,
                        g_exercise_data.lives, g_exercise_data.ammo,
                        g_exercise_data.bateria_ch,
@@ -451,7 +477,7 @@ static void Lora_EnviarTelemetria(void)
                        (double)g_exercise_data.altitud,
                        g_exercise_data.orientacion, g_exercise_data.pasos,
                        g_exercise_data.ack, (unsigned long)g_exercise_data.timestamp,
-                       g_exercise_data.bateria_ap);
+                       g_exercise_data.bateria_ap, g_exercise_data.atacante_numero_lora);
 
     if (n <= 0 || (size_t)n >= sizeof(csv)) {
         Log_Print("LORA", "ERROR: CSV de telemetria demasiado grande.");
@@ -630,9 +656,24 @@ static void LoraTask(void *argument)
     uint32_t last_testlora_tx = 0U;
 
     for (;;) {
+        /* Mientras haya atacantes pendientes de reportar, la telemetria
+         * sale cada ATACANTE_REPORT_PERIOD_MS (2s) en vez de
+         * LORA_EXERCISE_PERIOD_MS (10s), para vaciar la cola mas rapido —
+         * un atacante por envio. Sin pendientes, cadencia normal. */
+        uint32_t periodo_actual = (s_atacante_count > 0U) ? ATACANTE_REPORT_PERIOD_MS : LORA_EXERCISE_PERIOD_MS;
+
         if ((g_modo_operacion == MODO_EJERCICIO) &&
-            ((HAL_GetTick() - last_exercise_tx) >= LORA_EXERCISE_PERIOD_MS)) {
+            ((HAL_GetTick() - last_exercise_tx) >= periodo_actual)) {
             last_exercise_tx = HAL_GetTick();
+
+            if (s_atacante_count > 0U) {
+                g_exercise_data.atacante_numero_lora = s_atacante_buffer[s_atacante_tail];
+                s_atacante_tail = (uint8_t)((s_atacante_tail + 1U) % ATACANTE_BUFFER_MAX);
+                s_atacante_count--;
+            } else {
+                g_exercise_data.atacante_numero_lora = 0U;   /* 0 = nadie nos ataco en este envio */
+            }
+
             Lora_EnviarTelemetria();
         }
 
@@ -826,6 +867,18 @@ static void CalibrateTask(void *argument)
                         int32_t asn_len = snprintf(asn_msg, sizeof(asn_msg), "$A_SN%u\r", g_exercise_data.lives);
                         if (asn_len > 0 && (size_t)asn_len < sizeof(asn_msg)) {
                             Bt_Transmit(&s_bt_task, (uint8_t *)asn_msg, (uint16_t)asn_len);
+                        }
+
+                        /* Encola al atacante (el "dato" recibido ES su
+                         * numero/canal LoRa) para que LoraTask lo reporte
+                         * en el campo atacante_numero_lora de la proxima
+                         * telemetria — ver ATACANTE_BUFFER_MAX arriba. */
+                        if (s_atacante_count < ATACANTE_BUFFER_MAX) {
+                            s_atacante_buffer[s_atacante_head] = (uint8_t)dato;
+                            s_atacante_head = (uint8_t)((s_atacante_head + 1U) % ATACANTE_BUFFER_MAX);
+                            s_atacante_count++;
+                        } else {
+                            Log_Print("CALIB", "ERROR: buffer de atacantes lleno (50) — se descarta este.");
                         }
 
                         if (g_exercise_data.lives == 0U) {
