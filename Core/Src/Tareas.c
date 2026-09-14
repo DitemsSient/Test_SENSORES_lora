@@ -385,6 +385,18 @@ static void Lora_ProcesarLinea(const char *line)
         const char *contenido = conf_pos + 4;
         if (Lora_ParseDatos(contenido, &g_exercise_data)) {
             Log_Print("LORA", "CONF recibido y guardado en g_exercise_data.");
+            /* 2026-09-15 (bug real encontrado por el usuario): Lora_ParseDatos()
+             * NO toca atacante_numero_lora, asi que si veniamos de un
+             * ejercicio anterior con un atacante ya reportado, ese numero se
+             * quedaba pegado y se mandaba tal cual en la primera telemetria
+             * del juego nuevo (la que confirma el ACKCONF) — como si ya nos
+             * hubieran disparado sin haber empezado. Limpio tambien la cola
+             * de atacantes pendientes por la misma razon: un atacante
+             * encolado de la partida anterior no debe reportarse en esta. */
+            g_exercise_data.atacante_numero_lora = 0U;
+            s_atacante_head  = 0U;
+            s_atacante_tail  = 0U;
+            s_atacante_count = 0U;
             /* [PRUEBA] Diagnostico de la MAC — sospecha de que la MAC real
              * (armada por el gateway/servidor de otro equipo, a diferencia
              * de las de prueba tecleadas a mano) pueda traer algun
