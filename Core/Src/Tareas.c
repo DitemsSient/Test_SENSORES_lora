@@ -65,18 +65,13 @@ extern Ir_Handle_t ir_handle;
  * telemetria de cada LORA_EXERCISE_PERIOD_MS ya abre su propia ventana. */
 #define TESTLORA_PERIOD_MS   15000U    /**< Cada cuanto se manda "TESTLORA" mientras estamos en MODO_CONFIGURACION */
 
-/* Tarjeta de pruebas aislada de LoRa (2026-09-09): solo trae el modulo LoRa
- * y parte de la alimentacion, sin GPS ni sensores conectados — asi que
- * GpsTask/SensorsTask van a estar tronando en cada lectura sin aportar
- * nada util mientras se prueba el LoRa solo. En vez de una tarea aparte
- * (que competiria por el mismo huart2 que ya usa LoraTask para telemetria),
- * el envio periodico de "TESTLORA" se agrega dentro del loop de LoraTask —
- * mismo criterio ya usado para la telemetria de MODO_EJERCICIO: un solo
- * dueno del UART, sin mutex extra ni riesgo de dos tareas transmitiendo al
- * mismo tiempo. Regresar ambas a 1U cuando la tarjeta final con todos los
- * sensores este lista para probarse de nuevo. */
-#define TASK_GPS_ENABLE          0U
-#define TASK_SENSORS_ENABLE      0U
+/* En TEST_SN_LORA (2026-09-15) es al reves de la tarjeta de pruebas
+ * aislada de LoRa: aqui SI hay GPS y sensores reales conectados, lo unico
+ * que falta es el modulo LoRa fisico — por eso GpsTask/SensorsTask vuelven
+ * a 1U en esta rama. TESTLORA se queda igual (dentro del loop de LoraTask,
+ * sin tarea aparte) porque ese envio no depende de si hay sensores o no. */
+#define TASK_GPS_ENABLE          1U
+#define TASK_SENSORS_ENABLE      1U
 
 /* ======================  STATIC VARIABLES  ================================ */
 
@@ -401,18 +396,24 @@ static void Lora_ProcesarLinea(const char *line)
  * GpsTask esta deshabilitada (TASK_GPS_ENABLE=0) — punto de partida las
  * coordenadas reales que dio el usuario (su companero de pruebas). Paso
  * chico a proposito (~5m por envio) para que se note un desplazamiento
- * pequeno en el mapa, no un salto brusco. */
+ * pequeno en el mapa, no un salto brusco. SOLO se aplica a latitud/
+ * longitud cuando TASK_GPS_ENABLE==0 (tarjeta de pruebas sin GPS real) —
+ * en TEST_SN_LORA (2026-09-15), con GpsTask habilitada y GPS real
+ * conectado, esto se deshabilita para no pisar el fix real con datos
+ * falsos; timestamp/orientacion/pasos se siguen llenando aqui de todos
+ * modos porque orientacion/pasos todavia no se calculan de verdad (ver
+ * TODO en Inicializacion.h). */
 #define SIM_GPS_LAT_INICIAL     19.436408
 #define SIM_GPS_LON_INICIAL    -99.176603
 #define SIM_GPS_STEP_DEG          0.00005   /* ~5m por envio a esta latitud */
 
 /**
- * @brief  [PRUEBA] Avanza g_exercise_data.latitud/longitud/timestamp un
- *         poquito en cada llamada (arriba/derecha en el mapa = norte/este,
- *         +lat/+lon) y pone orientacion/pasos al azar — todo sin sensores
- *         reales, solo para validar que la app de Unity refleje cambios.
- *         Quitar/reemplazar por las lecturas reales de GPS/IMU cuando
- *         TASK_GPS_ENABLE vuelva a 1.
+ * @brief  [PRUEBA] Avanza g_exercise_data.timestamp de 1 en 1 y pone
+ *         orientacion/pasos al azar en cada llamada — mas
+ *         latitud/longitud tambien (arriba/derecha en el mapa =
+ *         norte/este, +lat/+lon), pero SOLO si TASK_GPS_ENABLE==0 (ver
+ *         nota arriba). Quitar/reemplazar por las lecturas reales de
+ *         GPS/IMU cuando orientacion/pasos ya se calculen de verdad.
  */
 static void Lora_SimularMovimiento(void)
 {
@@ -420,14 +421,18 @@ static void Lora_SimularMovimiento(void)
     static uint32_t ts_sim = 0U;
 
     if (!inicializado) {
+#if !TASK_GPS_ENABLE
         g_exercise_data.latitud  = SIM_GPS_LAT_INICIAL;
         g_exercise_data.longitud = SIM_GPS_LON_INICIAL;
+#endif
         ts_sim = HAL_GetTick() / 1000U;
         srand(HAL_GetTick());
         inicializado = true;
     } else {
+#if !TASK_GPS_ENABLE
         g_exercise_data.latitud  += SIM_GPS_STEP_DEG;   /* un poco hacia arriba (norte) */
         g_exercise_data.longitud += SIM_GPS_STEP_DEG;   /* un poco hacia la derecha (este) */
+#endif
         ts_sim++;
     }
 
