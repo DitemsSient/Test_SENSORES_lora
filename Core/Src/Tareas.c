@@ -815,10 +815,13 @@ static void SensorsTask(void *argument)
  *             16 bits, "dato" (frame_buf[0..1]) y "ash" (frame_buf[2..3]),
  *             la misma informacion mandada por duplicado como verificacion
  *             (sin formula de hash real, es solo redundancia). Valido
- *             solo si dato == ash; en ese caso se descuenta 1 bala
- *             (g_exercise_data.ammo) y se manda "$A_SN<vidas>\r" a la Mira
- *             (numero de vidas ACTUAL, sin cambiar aqui — este disparo
- *             descuenta municion, no vidas). Si dato != ash, se descarta
+ *             solo si dato == ash; en ese caso se descuenta 1 VIDA
+ *             (g_exercise_data.lives) y se reporta por los 2 canales:
+ *             Bluetooth ("$A_SN<vidas>\r" a la Mira, vidas YA actualizada)
+ *             y LoRa (se encola "dato" — el numero/canal de quien nos
+ *             disparo — en s_atacante_buffer, para que LoraTask lo mande
+ *             en el campo atacante_numero_lora de la siguiente telemetria,
+ *             ver ATACANTE_REPORT_PERIOD_MS). Si dato != ash, se descarta
  *             (log de todos modos, para depurar). Si tras esto las vidas
  *             ya estan en 0, se marca s_vidas_agotadas para que LoraTask
  *             mande $END_M al gateway (ver Lora_ManejarFinPorVidas()).
@@ -857,11 +860,11 @@ static void CalibrateTask(void *argument)
                     Log_Printf("CALIB", "Disparo: dato=0x%04X ash=0x%04X", dato, ash);
 
                     if (ir_handle.frame_len >= 4U && dato == ash) {
-                        if (g_exercise_data.ammo > 0U) {
-                            g_exercise_data.ammo--;
+                        if (g_exercise_data.lives > 0U) {
+                            g_exercise_data.lives--;
                         }
-                        Log_Printf("CALIB", "Disparo valido — balas restantes=%u vidas=%u",
-                                   g_exercise_data.ammo, g_exercise_data.lives);
+                        Log_Printf("CALIB", "Disparo valido — vidas restantes=%u",
+                                   g_exercise_data.lives);
 
                         char    asn_msg[24];
                         int32_t asn_len = snprintf(asn_msg, sizeof(asn_msg), "$A_SN%u\r", g_exercise_data.lives);
