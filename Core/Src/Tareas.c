@@ -1048,7 +1048,8 @@ static void CalibrateTask(void *argument)
                         ash  = ((uint16_t)ir_handle.frame_buf[2] << 8U) | ir_handle.frame_buf[3];
                     }
 
-                    Log_Printf("CALIB", "Disparo: dato=0x%04X ash=0x%04X", dato, ash);
+                    Log_Printf("CALIB", "Disparo: dato=0x%04X ash=0x%04X (raw_count=%u frame_len=%u)",
+                               dato, ash, (unsigned)raw_count, (unsigned)ir_handle.frame_len);
 
                     if (ir_handle.frame_len >= 4U && dato == ash) {
                         if (g_exercise_data.lives > 0U) {
