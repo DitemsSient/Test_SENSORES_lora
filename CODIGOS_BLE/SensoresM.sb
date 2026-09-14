@@ -4,6 +4,10 @@
 // Al conectar (transporte BLE): $ACKCON\r
 // Al desconectarse: $DSCON\r, y sigue reintentando de inmediato
 // Al terminar discovery + suscripcion (puerto virtual listo): $READY\r
+// $CANCELCON\r (mientras seguimos intentando conectar, aun sin exito):
+//   cancela el ciclo de reintento y vuelve a esperar un $CON nuevo — lo
+//   manda el STM32 si se le agoto su propio timeout esperando ACKCON
+//   (2026-09-15, ver BT_ACKCON_TIMEOUT_MS en Bluetooth.h del firmware).
 // De ahi en adelante: puente transparente UART <-> BLE, sin analizar contenido
 
 DIM rc
@@ -25,10 +29,12 @@ DIM nBleMaxPacketLength
 DIM uartBuf$    : uartBuf$ = ""
 DIM esperandoMac : esperandoMac = 1
 DIM macDestino$ : macDestino$ = ""
+DIM cancelado   : cancelado = 0   // 1 mientras se espera que HndlrConnTO/HndlrBleMsg vean el cancelCON pendiente
 
 #define MAC_LEN 14
 #define CON_TAG "CON"
 #define CON_TAG_LEN 3
+#define CANCELCON_TAG "CANCELCON"
 
 #define RETRY_DELAY_MS 500
 
@@ -86,11 +92,23 @@ FUNCTION ProcesarCon()
     macDestino$ = MID$(datos$, CON_TAG_LEN, MAC_LEN)
     periphAddr$ = StrDehexize$(macDestino$)
     esperandoMac = 0
+    cancelado = 0
 
     // Ya no se manda de vuelta la MAC por UART - igual que en Apuntador,
     // solo se conecta y se manda $ACKCON al lograrlo.
     // Iniciar ciclo de conexion en 1s
     TimerStart(2, 1000, 0)
+ENDFUNC 1
+
+// Parsea $CANCELCON\r — solo tiene sentido mientras esperandoMac==0 y
+// connected==0 (ya recibimos un $CON y seguimos intentando BleConnect() en
+// el fondo, pero el STM32 se canso de esperar ACKCON). Cancela el timer de
+// reintento y vuelve a esperar un $CON nuevo.
+FUNCTION ProcesarCancelCon()
+    TimerCancel(2)
+    cancelado = 1
+    esperandoMac = 1
+    PRINT "\nCANCELCON recibido — se cancela el intento, esperando $CON nuevo...\n"
 ENDFUNC 1
 
 // Intentar conexion (3s timeout)
@@ -231,6 +249,20 @@ FUNCTION HndlrUartRx()
                         bleMsg$ = uartBuf$
                     ENDIF
                     rc = BleGattcWriteCmd(hConn, rxAttrHndl, bleMsg$)
+                ELSE
+                    // esperandoMac==0 y connected==0: ya recibimos un $CON
+                    // y seguimos intentando BleConnect() en el fondo (via
+                    // Timer2) sin exito todavia — el unico comando valido
+                    // aqui es $CANCELCON, todo lo demas se ignora.
+                    DIM dc
+                    dc = StrGetChr(uartBuf$, 0)
+                    IF dc == 36 THEN
+                        DIM cmdBody$ : cmdBody$ = MID$(uartBuf$, 1, STRLEN(uartBuf$) - 1)
+                        DIM cancelTag$ : cancelTag$ = CANCELCON_TAG
+                        IF StrCmp(cmdBody$, cancelTag$) == 0 THEN
+                            rc = ProcesarCancelCon()
+                        ENDIF
+                    ENDIF
                 ENDIF
             ENDIF
             uartBuf$ = ""
@@ -243,8 +275,15 @@ FUNCTION HndlrUartRx()
     ENDWHILE
 ENDFUNC 1
 
-// Timeout de conexion (3s) -> reintentar de inmediato (con respiro corto)
+// Timeout de conexion (3s) -> reintentar de inmediato (con respiro corto),
+// SALVO que se haya pedido CANCELCON mientras este intento estaba en
+// vuelo — ahi ya no se reinicia el timer, se deja esperando un $CON nuevo.
 FUNCTION HndlrConnTO()
+    IF cancelado == 1 THEN
+        cancelado = 0
+        PRINT "\nIntento cancelado (CANCELCON) — no se reintenta.\n"
+        EXITFUNC 1
+    ENDIF
     PRINT "\nNo encontrada"
     PRINT "\nReintentando..."
     TimerStart(2, RETRY_DELAY_MS, 0)

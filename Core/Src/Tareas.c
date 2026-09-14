@@ -138,7 +138,13 @@ bool g_lora_dma_activo = false;
  * revisa para saber cuando debe mandar la telemetria de vuelta (se marca
  * al llegar ACKCONF en BluetoothTask). Mismo patron volatile que
  * s_ack_pendiente/s_bt_conectado — un solo escritor, un solo lector cada
- * una, sin necesidad de mutex. */
+ * una, sin necesidad de mutex... EXCEPTO s_lora_conf_listo: BluetoothTask
+ * tambien la pone en false si se agota BT_ACKCON_TIMEOUT_MS sin conectar
+ * (ver "retomar_inicio"), para volver a esperar un $CONF fresco en vez
+ * del mismo de antes. Ventana de carrera teorica si un $CONF nuevo llega
+ * justo en ese instante, pero es un bool simple (escritura atomica en
+ * Cortex-M) y el caso es raro/no critico — en el peor caso se espera al
+ * siguiente $CONF. */
 static volatile bool s_lora_conf_listo       = false;
 static volatile bool s_lora_enviar_telemetria = false;
 
@@ -880,9 +886,14 @@ static void BT_Blink(bool red, bool green, bool blue, uint32_t period_ms, uint8_
 
 /**
  * @brief  Maneja "$DSCON" — llega en cualquier momento, sin importar que
- *         estabamos esperando. Responde $ACKDSCON y parpadea cian
- *         (verde+azul) LEDS_BT_DSCON_COUNT veces (LEDS_BT_DSCON_MS) —
- *         homologado con la secuencia equivalente de la Mira.
+ *         estabamos esperando. Responde $ACKDSCON y espera
+ *         BT_DSCON_RECONNECT_WINDOW_MS (5s) a ver si el modulo se
+ *         reconecta solo — SOLO si esa ventana se agota SIN reconectar se
+ *         parpadea cian (verde+azul) LEDS_BT_DSCON_COUNT veces
+ *         (LEDS_BT_DSCON_MS) y ahi si se da por vencido (decidido con el
+ *         usuario 2026-09-15: nada de parpadear antes de confirmar que de
+ *         verdad se perdio la conexion — homologado con la secuencia
+ *         equivalente de la Mira, solo que ahora condicionado).
  * @note   Bug real encontrado con hardware 2026-09-10: el modulo BL654
  *         (SensoresM.sb) ya reintenta la conexion BLE SOLO tras un corte
  *         breve de RF (su propio TimerStart(2, RETRY_DELAY_MS, 0) en el
@@ -892,8 +903,6 @@ static void BT_Blink(bool red, bool green, bool blue, uint32_t period_ms, uint8_
  *         siempre apenas veia un DSCON, ignorando ese reintento automatico
  *         del modulo — por eso "nunca hubo una desconexion real" del otro
  *         lado (la Mira/kit) pero nosotros si nos dabamos por vencidos.
- *         Ahora, tras el parpadeo, se espera BT_DSCON_RECONNECT_WINDOW_MS
- *         a ver si llega un "$ACKCON" nuevo.
  * @retval true  si se reconecto solo dentro de la ventana (llego un
  *               "$ACKCON" nuevo) — el caller debe retomar el flujo desde
  *               "esperando READY" (ver BluetoothTask, retomar_ready).
@@ -907,7 +916,7 @@ static bool BT_HandleDSCON(void)
 {
     static const uint8_t ackdscon[] = "$ACKDSCON\r";
     Bt_Transmit(&s_bt_task, ackdscon, sizeof(ackdscon) - 1U);
-    Log_Print("BT", "DSCON recibido — desconectados.");
+    Log_Print("BT", "DSCON recibido — esperando reconexion automatica del modulo (sin parpadear todavia)...");
 
     s_bt_conectado = false;
     /* s_ack_pendiente NO se toca aqui a proposito — es del caller
@@ -915,15 +924,15 @@ static bool BT_HandleDSCON(void)
      * de el; tocarlo aqui rompia esos loops si esta funcion llegaba a
      * regresar). */
 
-    BT_Blink(false, true, true, LEDS_BT_DSCON_MS, LEDS_BT_DSCON_COUNT);   /* cian = verde+azul */
-
-    Log_Print("BT", "Esperando reconexion automatica del modulo...");
+    /* Nada de parpadear "por si acaso" — solo si se confirma que de
+     * verdad no hubo reconexion (ver abajo). Decidido con el usuario
+     * 2026-09-15. */
     uint32_t start = HAL_GetTick();
     while ((HAL_GetTick() - start) < BT_DSCON_RECONNECT_WINDOW_MS) {
         if (s_bt_task.rx_ready) {
             if (strcmp((char *)s_bt_task.rx_buffer, "ACKCON") == 0) {
                 Bt_ResetRx(&s_bt_task);
-                Log_Print("BT", "Reconectado solo (ACKCON nuevo tras DSCON) — retomando enlace.");
+                Log_Print("BT", "Reconectado solo (ACKCON nuevo tras DSCON) — retomando enlace, sin parpadeo.");
                 Leds_SetAzul(true);
                 s_bt_conectado = true;
                 return true;
@@ -933,7 +942,8 @@ static bool BT_HandleDSCON(void)
         osDelay(20U);
     }
 
-    Log_Print("BT", "No se reconecto a tiempo — BluetoothTask se queda inerte.");
+    Log_Print("BT", "No se reconecto a tiempo — desconexion real, parpadeo cian y BluetoothTask se queda inerte.");
+    BT_Blink(false, true, true, LEDS_BT_DSCON_MS, LEDS_BT_DSCON_COUNT);   /* cian = verde+azul */
     for (;;) {
         osDelay(1000U);
     }
@@ -1057,27 +1067,33 @@ static void BT_HandleEndA(void)
 
 /**
  * @brief  Tarea de Bluetooth: enlace inicial con Mira, protocolo $...\r.
- * @note   Secuencia (2026-09-07):
- *         [PRUEBA] sin LoraTask todavia, g_exercise_data ya viene precargada
- *         (ver Inicializacion.c) simulando un $CONF ya recibido por LoRa —
- *         solo parpadeamos magenta 10s para simular esa espera.
- *         Luego: $CON<mac> -> parpadeo azul INDEFINIDO hasta "ACKCON" (si
- *         llega otra cosa, parpadeo rojo 3x400ms y se sigue esperando) ->
- *         azul fijo (enlazados) -> espera "READY" -> $CONF<datos> (solo
- *         mac1, mac2 no se manda) -> espera "ACKCONF" hasta
- *         BT_ACKCONF_TIMEOUT_MS -> loop de escucha para siempre.
+ * @note   Secuencia (actualizada 2026-09-15):
+ *         retomar_inicio: espera s_lora_conf_listo (LoraTask ya recibio y
+ *         guardo un $CONF real) -> $CON<mac> -> espera "ACKCON" hasta
+ *         BT_ACKCON_TIMEOUT_MS (60s; si llega otra cosa, parpadeo rojo
+ *         3x400ms y se sigue esperando). Si se agota sin ACKCON: nunca
+ *         conecto por BLE — se manda "$CANCELCON\r" al modulo (deja de
+ *         insistir en conectarse), se avisa al gateway con
+ *         ack=BT_GW_ACK_SIN_CONEXION, y se regresa a retomar_inicio a
+ *         esperar un $CONF fresco (sin mensaje de "reintenta", se trata
+ *         igual que la primera conexion).
+ *         Si SI llega ACKCON: azul fijo (enlazados) -> espera "READY" ->
+ *         $CONF<datos> (solo mac1, mac2 no se manda) -> espera "ACKCONF"
+ *         hasta BT_ACKCONF_TIMEOUT_MS, con BT_ACKCONF_REINTENTOS
+ *         reintentos (reenvia $CONF) antes de rendirse -> loop de escucha
+ *         para siempre. Si nunca llega ACKCONF ni con el reintento: se
+ *         avisa al gateway con ack=BT_GW_ACK_SIN_ACKCONF, sin ninguna
+ *         accion extra a proposito (ver su doc comment en Bluetooth.h).
  *         "$DSCON" se atiende SIEMPRE, en cualquier punto de la secuencia
- *         (ver BT_HandleDSCON()) — parpadea cian y espera
- *         BT_DSCON_RECONNECT_WINDOW_MS a ver si el modulo se reconecta
- *         solo (SensoresM.sb ya reintenta la conexion BLE por su cuenta
- *         tras un corte breve de RF). Si se reconecta (llega un "$ACKCON"
+ *         (ver BT_HandleDSCON()) — espera BT_DSCON_RECONNECT_WINDOW_MS
+ *         (5s) a ver si el modulo se reconecta solo (SensoresM.sb ya
+ *         reintenta la conexion BLE por su cuenta tras un corte breve de
+ *         RF), SIN parpadear todavia. Si reconecta (llega un "$ACKCON"
  *         nuevo), retoma el flujo desde "esperando READY" (goto
- *         retomar_ready); si no, ahi si se queda inerte para siempre.
- * @note   Espera a s_lora_conf_listo (LoraTask ya recibio y guardo un
- *         $CONF real) antes de mandar $CON — ya no hay delay simulado.
- * @note   TODO: que hacer tras un timeout de ACKCONF (reintentar, reportar
- *         error, etc.) sigue pendiente de definir — de momento solo se
- *         loguea y se sigue al loop de escucha.
+ *         retomar_ready) sin haber parpadeado nada; si no reconecta en
+ *         esa ventana, ahi si parpadea cian y se queda inerte para
+ *         siempre (desconexion real, sin manejo de reconexion por
+ *         lejania — pendiente a proposito).
  */
 static void BluetoothTask(void *argument)
 {
@@ -1089,6 +1105,12 @@ static void BluetoothTask(void *argument)
     s_bt_conectado  = false;
     s_ack_pendiente = ACK_NINGUNO;
 
+    /* retomar_inicio: aqui regresa el flujo si se agota BT_ACKCON_TIMEOUT_MS
+     * sin ACKCON (ver abajo) — se trata exactamente como si fuera la
+     * primera conexion: espera un $CONF fresco por LoRa, sin ningun
+     * mensaje especial de "reintenta ahora" (decidido con el usuario
+     * 2026-09-15). */
+retomar_inicio:
     Log_Print("BT", "Esperando $CONF por LoRa...");
     while (!s_lora_conf_listo) {
         osDelay(50U);
@@ -1100,10 +1122,11 @@ static void BluetoothTask(void *argument)
 
     Bt_SendAdvertise(&s_bt_task, g_exercise_data.mac);   /* $CON<mac>\r */
     s_ack_pendiente = ACK_CON;
-    Log_Print("BT", "CON enviado, esperando ACKCON (parpadeo azul, sin limite de tiempo)...");
+    Log_Printf("BT", "CON enviado, esperando ACKCON (hasta %lus)...", (unsigned long)(BT_ACKCON_TIMEOUT_MS / 1000U));
 
-    bool     led_on     = false;
-    uint32_t last_blink = HAL_GetTick();
+    bool     led_on      = false;
+    uint32_t last_blink  = HAL_GetTick();
+    uint32_t ackcon_start = HAL_GetTick();
     for (;;) {
         if (s_bt_task.rx_ready) {
             if (strncmp((char *)s_bt_task.rx_buffer, "DSCON", 5U) == 0) {
@@ -1124,6 +1147,23 @@ static void BluetoothTask(void *argument)
             Log_Printf("BT", "Esperaba ACKCON, llego: %s", (char *)s_bt_task.rx_buffer);
             Bt_ResetRx(&s_bt_task);
             BT_Blink(true, false, false, LEDS_BT_ERROR_MS, LEDS_BT_ERROR_COUNT);
+        }
+
+        if ((HAL_GetTick() - ackcon_start) >= BT_ACKCON_TIMEOUT_MS) {
+            /* Nunca conecto por BLE (MAC mal registrada, dispositivo
+             * elegido mal, etc.) — le decimos al modulo que deje de
+             * insistir, avisamos al gateway con ack=2, y regresamos al
+             * principio a esperar un $CONF fresco. */
+            static const uint8_t cancelcon[] = "$CANCELCON\r";
+            Bt_Transmit(&s_bt_task, cancelcon, sizeof(cancelcon) - 1U);
+            Log_Print("BT", "ERROR: nunca llego ACKCON — $CANCELCON enviado, avisando al gateway (ack=2).");
+
+            s_ack_pendiente = ACK_NINGUNO;
+            Leds_Apagar();
+            g_exercise_data.ack     = (uint8_t)BT_GW_ACK_SIN_CONEXION;
+            s_lora_enviar_telemetria = true;
+            s_lora_conf_listo        = false;   /* esperar un $CONF nuevo, no el mismo de antes */
+            goto retomar_inicio;
         }
 
         if ((HAL_GetTick() - last_blink) >= BT_BLINK_MS) {

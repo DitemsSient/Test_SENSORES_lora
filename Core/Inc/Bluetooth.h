@@ -41,8 +41,15 @@ extern "C" {
 #define BT_TX_BUFFER_SIZE       256U    /**< Max transmit payload bytes      */
 #define BT_RX_BUFFER_SIZE       256U    /**< Max receive payload bytes       */
 
-/* Advertise protocol — espera de ACKCON es indefinida (ver BluetoothTask en
- * Tareas.c), no tiene timeout propio. */
+/* Decidido con el usuario 2026-09-15: si no llega "ACKCON" en este tiempo
+ * (o sea, nunca conecto por BLE — MAC mal registrada, dispositivo elegido
+ * mal, etc.), se manda "$CANCELCON\r" al modulo (le dice que deje de
+ * insistir en conectarse y vuelva a esperar un $CON nuevo, ver
+ * SensoresM.sb) y se avisa al gateway con ack=BT_GW_ACK_SIN_CONEXION. De
+ * ahi, BluetoothTask regresa al principio a esperar un $CONF fresco por
+ * LoRa — no hay mensaje de "reintenta ahora", se trata exactamente como
+ * si fuera la primera conexion. */
+#define BT_ACKCON_TIMEOUT_MS    60000U  /**< Timeout esperando ACKCON tras mandar $CON<mac> */
 
 #define BT_ACKCONF_TIMEOUT_MS   30000U  /**< Timeout esperando ACKCONF tras mandar $CONF<datos> (por intento — hay 1 reintento, ver BT_ACKCONF_REINTENTOS) */
 #define BT_ACKCONF_REINTENTOS       1U  /**< Cuantas veces se reenvia $CONF si no llego ACKCONF antes de rendirse */
@@ -52,8 +59,11 @@ extern "C" {
  * manejador de desconexion) — confirmado con hardware real 2026-09-10:
  * un $DSCON puede venir seguido, segundos despues, de un $ACKCON nuevo
  * porque el modulo ya se reconecto solo. BT_HandleDSCON() espera esta
- * ventana a ver si eso pasa antes de darse por vencido. */
-#define BT_DSCON_RECONNECT_WINDOW_MS  4000U
+ * ventana a ver si eso pasa antes de darse por vencido — y SOLO si se
+ * agota sin reconectar es cuando parpadea cian (decidido con el usuario
+ * 2026-09-15: nada de parpadear "por si acaso", solo cuando ya se
+ * confirmo que de verdad se perdio la conexion). */
+#define BT_DSCON_RECONNECT_WINDOW_MS  5000U
 
 /* ========================  ENUMERATIONS  ================================== */
 
@@ -85,15 +95,15 @@ typedef enum {
  *         en el campo "ack" de la telemetria (g_exercise_data.ack) — la
  *         pagina/app que consume esos datos usa este numero para saber que
  *         paso, no solo "si"/"no". Ver BluetoothTask en Tareas.c.
- * @note   BT_GW_ACK_SIN_CONEXION (2) esta definido pero TODAVIA NO SE USA
- *         — el timeout de ACKCON sigue siendo indefinido a proposito
- *         (pendiente decidir como manejar ese caso, 2026-09-14). Se deja
- *         el valor reservado desde ahora para que el resto del enum no
- *         cambie de numero cuando se implemente. */
+ * @note   BT_GW_ACK_SIN_ACKCONF (3) se manda, pero deliberadamente no
+ *         dispara ninguna accion extra (sin desconexion ni reintento
+ *         forzado) — decidido con el usuario 2026-09-15: caso poco
+ *         probable, se deja el codigo por si hace falta un manejador en
+ *         el futuro, pero no se implementa nada mas por ahora. */
 typedef enum {
     BT_GW_ACK_CONFIRMADO   = 1,   /**< Conectado por BLE y ACKCONF recibido (con o sin reintento) */
-    BT_GW_ACK_SIN_CONEXION = 2,   /**< TODO/pendiente: nunca llego ACKCON — timeout de conexion BLE aun sin definir */
-    BT_GW_ACK_SIN_ACKCONF  = 3,   /**< Conecto por BLE pero nunca llego ACKCONF, ni con el reintento — falta definir el comando de desconexion+reintento completo */
+    BT_GW_ACK_SIN_CONEXION = 2,   /**< Nunca llego ACKCON dentro de BT_ACKCON_TIMEOUT_MS — se cancelo el intento (ver $CANCELCON) y se regresa a esperar un $CONF fresco */
+    BT_GW_ACK_SIN_ACKCONF  = 3,   /**< Conecto por BLE pero nunca llego ACKCONF, ni con el reintento — sin manejador adicional a proposito, ver nota arriba */
 } BtGatewayAck_e;
 
 /* ============================  STRUCTURES  ================================ */
