@@ -1614,6 +1614,33 @@ void Tareas_CrearTareas(void)
 /* ======================  HAL WEAK CALLBACKS  =============================== */
 
 /**
+ * @brief  Log crudo de lo que acaba de dejar el DMA de LoRa, tal cual llego
+ *         — sin esperar a que Lora_StoreBytes() arme una linea completa
+ *         (util cuando se sospecha que el fin de linea nunca cierra, ver
+ *         2026-09-15). Se llama desde HAL_UARTEx_RxEventCallback(), en
+ *         contexto de interrupcion — Log_Printf() ya es seguro ahi
+ *         (encola sin bloquear, ver Logger.h).
+ * @note   Gateado por LORA_VERBOSE_LOG (ver Lora.h) — en modo normal no
+ *         imprime nada, para no ensuciar el logger fuera de estas pruebas.
+ */
+static void Lora_LogRawDma(const uint8_t *data, uint16_t len)
+{
+#if LORA_VERBOSE_LOG
+    if (len == 0U) return;
+
+    char buf[65];
+    uint16_t copy_len = (len < (sizeof(buf) - 1U)) ? len : (uint16_t)(sizeof(buf) - 1U);
+    memcpy(buf, data, copy_len);
+    buf[copy_len] = '\0';
+
+    Log_Printf("LORA", "[DMA] %u bytes: %s", (unsigned)len, buf);
+#else
+    (void)data;
+    (void)len;
+#endif
+}
+
+/**
  * @brief  HAL weak callback — evento de recepcion por DMA con deteccion de
  *         linea IDLE (HAL_UARTEx_ReceiveToIdle_DMA). En modo circular,
  *         "Size" es la posicion absoluta dentro del buffer donde va la
@@ -1641,9 +1668,12 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 
     if (huart->Instance == LORA_UART->Instance) {
         if (Size >= s_lora_dma_last_pos) {
+            Lora_LogRawDma(&s_lora_dma_buf[s_lora_dma_last_pos], (uint16_t)(Size - s_lora_dma_last_pos));
             Lora_StoreBytes(&s_lora_task, &s_lora_dma_buf[s_lora_dma_last_pos],
                             (uint16_t)(Size - s_lora_dma_last_pos));
         } else {
+            Lora_LogRawDma(&s_lora_dma_buf[s_lora_dma_last_pos], (uint16_t)(LORA_DMA_BUF_SIZE - s_lora_dma_last_pos));
+            Lora_LogRawDma(&s_lora_dma_buf[0], Size);
             Lora_StoreBytes(&s_lora_task, &s_lora_dma_buf[s_lora_dma_last_pos],
                             (uint16_t)(LORA_DMA_BUF_SIZE - s_lora_dma_last_pos));
             Lora_StoreBytes(&s_lora_task, &s_lora_dma_buf[0], Size);
