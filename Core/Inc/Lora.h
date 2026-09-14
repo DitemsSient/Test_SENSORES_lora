@@ -38,7 +38,7 @@ extern "C" {
  * en 1 cuando haga falta ver TODO lo que manda/contesta el modulo
  * (comando por comando, igual que antes) para depurar un problema real —
  * ver Lora_SendAndWait() en Lora.c y Lora_ProcesarLinea() en Tareas.c. */
-#define LORA_VERBOSE_LOG        1U   /**< 1 en TEST_SN_LORA mientras se prueba a mano por terminal (TeraTerm) — ver nota arriba */
+#define LORA_VERBOSE_LOG        0U
 
 /* Timeouts */
 
