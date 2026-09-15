@@ -72,6 +72,15 @@ extern Ir_Handle_t ir_handle;
 #define CALIB_RAW_MIN         16U    /**< raw_count > esto para considerar el buffer valido (ver Test_IR: tramas reales de 2 bytes dan 17-19 deltas) */
 #define CALIB_VALID_WORD  0xAA55U
 
+/* TESTER_LASER (2026-09-15, pedido del usuario) — en 1, cada disparo real
+ * (MODO_EJERCICIO) imprime ademas los deltas crudos de SPACE (en us) que
+ * midio el receptor para esa trama, junto con el dato decodificado
+ * (orden/lora) y el checksum esperado vs el recibido — util para ver a
+ * ojo como cambian los tiempos entre disparos reales y ajustar
+ * IR_BIT0_MAX_US/IR_BIT1_MAX_US si hace falta. En 0 (modo normal),
+ * CalibrateTask funciona igual que siempre, sin este log extra. */
+#define TESTER_LASER_ENABLE      0U
+
 #define LORA_DMA_BUF_SIZE    256U
 #define LORA_EXERCISE_PERIOD_MS 10000U /**< Cada cuanto se manda telemetria completa en MODO_EJERCICIO */
 
@@ -955,6 +964,44 @@ static void SensorsTask(void *argument)
  *             BluetoothTask mande $END_M a la Mira (ver
  *             BT_HandleFinPorVidas()).
  */
+/**
+ * @brief  [TESTER_LASER] Imprime los deltas crudos de SPACE (en us) de la
+ *         ultima trama IR recibida, junto con el dato decodificado y el
+ *         checksum esperado vs el recibido — para ver a ojo como cambian
+ *         los tiempos entre disparos reales y ajustar los umbrales de
+ *         bit0/bit1 si hace falta (ver IR_BIT0_MAX_US/IR_BIT1_MAX_US en
+ *         Receptor_Infrarrojo_EXTI.h). Solo hace algo si
+ *         TESTER_LASER_ENABLE==1 (ver arriba); en modo normal es un no-op.
+ * @param  h         Handle del receptor IR con la trama ya lista.
+ * @param  orden     Byte "orden" decodificado (0 si la trama vino incompleta).
+ * @param  lora      Byte "lora" decodificado (0 si la trama vino incompleta).
+ * @param  checksum  Byte "checksum" decodificado (0 si la trama vino incompleta).
+ */
+static void Tester_Laser_LogTimings(const Ir_Handle_t *h, uint8_t orden, uint8_t lora, uint8_t checksum)
+{
+#if TESTER_LASER_ENABLE
+    char     buf[120];
+    uint16_t off = 0U;
+
+    for (uint16_t i = 0U; i < h->raw_count; i++) {
+        int n = snprintf(&buf[off], sizeof(buf) - off, "%u ", (unsigned)h->raw_dt[i]);
+        if (n <= 0 || (size_t)(off + (uint16_t)n) >= sizeof(buf)) {
+            break;   /* se corta si no cupo — ya se ve suficiente para diagnosticar */
+        }
+        off = (uint16_t)(off + (uint16_t)n);
+    }
+
+    Log_Printf("TESTER_LASER", "deltas(us) x%u: %s", (unsigned)h->raw_count, buf);
+    Log_Printf("TESTER_LASER", "dato: orden=0x%02X lora=0x%02X | checksum esperado=0x%02X recibido=0x%02X",
+               orden, lora, (unsigned)(orden ^ lora), checksum);
+#else
+    (void)h;
+    (void)orden;
+    (void)lora;
+    (void)checksum;
+#endif
+}
+
 static void CalibrateTask(void *argument)
 {
     (void)argument;
@@ -990,6 +1037,7 @@ static void CalibrateTask(void *argument)
 
                     Log_Printf("CALIB", "Disparo: orden=0x%02X lora=0x%02X checksum=0x%02X (raw_count=%u frame_len=%u)",
                                orden, lora, checksum, (unsigned)raw_count, (unsigned)ir_handle.frame_len);
+                    Tester_Laser_LogTimings(&ir_handle, orden, lora, checksum);
 
                     if (valido) {
                         if (g_exercise_data.lives > 0U) {

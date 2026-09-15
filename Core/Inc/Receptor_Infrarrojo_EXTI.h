@@ -75,9 +75,12 @@ extern "C" {
 #define IR_BIT1_MAX_US          1000U     /**< 600 <= SPACE < esto -> bit 1 */
                                             /**< SPACE >= IR_BIT1_MAX_US -> separador */
 
-/* Tiempo sin ningun flanco nuevo que se interpreta como "trama terminada" */
+/* Tiempo sin ningun flanco nuevo que se interpreta como "trama terminada".
+ * Bajado de 1000 a 600 el 2026-09-15 (pedido del usuario) — la trama real
+ * completa (SYNC+3 bytes+SYNC) dura unos pocos ms, sobra margen de sobra
+ * con 600ms de silencio para no confundirla con dos disparos separados. */
 
-#define IR_SILENCE_MS            1000U
+#define IR_SILENCE_MS             600U
 
 /* ====================  DEVICE CONSTANTS  ================================== */
 
